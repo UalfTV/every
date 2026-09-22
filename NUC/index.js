@@ -10,6 +10,35 @@ const ROOM_CONFIG_FILE = process.env.ROOM_CONFIG_FILE || "./HA.config.js";
 const ROOM_CONFIG = require(ROOM_CONFIG_FILE);
 if (ROOM_CONFIG.PG_OVERRIDES && ROOM_CONFIG.PG_OVERRIDES.database) process.env.PGDATABASE = ROOM_CONFIG.PG_OVERRIDES.database;
 
+// ============================================
+// SISTEMAS CENTRALIZADOS - EMOJIS Y COLORES
+// ============================================
+
+const EMOJIS = {
+    success: "\u2705", error: "\u274c", warning: "\u26a0\ufe0f", info: "\ud83d\udca1",
+    soccer: "\u26bd", goal: "\u26bd", trophy: "\ud83c\udfc6",
+    coins: "\ud83d\udcb0", money: "\ud83d\udcb5", shop: "\ud83d\udecd", gift: "\ud83c\udf81",
+    red: "\ud83d\udd34", blue: "\ud83d\udd35", vs: "\u2694\ufe0f",
+    fire: "\ud83d\udd25", star: "\u2605", sparkles: "\u2728", crown: "\ud83d\udc51",
+    person: "\ud83d\udc64", people: "\ud83d\udc65", clock: "\u23f1\ufe0f",
+    message: "\ud83d\udcac", megaphone: "\ud83d\udce3", checkered: "\ud83c\udf1f",
+    shield: "\ud83d\udee1\ufe0f", arrow_right: "\u27a1", arrow_left: "\u25c0",
+    bronze: "\ud83e\udd49", silver: "\ud83e\udd48", gold: "\ud83e\udd47", platinum: "\ud83d\udc8e", diamond: "\ud83d\udd37",
+    master: "\ud83d\udc51", grand_master: "\ud83d\udc51", legend: "\ud83c\udf1f"
+};
+
+const COLORES = {
+    blanco: 0xFFFFFF, negro: 0x000000, gris: 0x808080,
+    rojo: 0xFF3366, azul: 0x00BFFF, verde: 0x00FF88,
+    amarillo: 0xFFD700, naranja: 0xFFAA00, morado: 0x9B59B6,
+    exito: 0x00FF88, error: 0xFF3366, advertencia: 0xFFAA00, info: 0x00BFFF,
+    equipo_rojo: 0xFF3366, equipo_azul: 0x00BFFF,
+    vip: 0x3B82F6, super_vip: 0x22D3EE, ultra_vip: 0xFF6B00,
+    bronce: 0xCD7F32, plata: 0xC0C0C0, oro: 0xFFD700,
+    platino: 0x87CEEB, diamante: 0x1E90FF, maestro: 0x9400D3,
+    gran_maestro: 0x6A0DAD, leyenda: 0xFF4500
+};
+
 const {
     loadDatabase: loadDatabaseFromPg, saveDatabase: saveDatabaseToPg, backupDatabase: backupDatabaseToPg,
     reservarNombre, liberarNombreReservado, fetchGlobalSyncData, agregarAdminAuto, quitarAdminAuto, fetchAdminsAuto,
@@ -79,8 +108,8 @@ const CONFIG = {
     GK_SUGERIR_ZONA_DISTANCIA: 150, GK_SUGERIR_TIEMPO_MS: 40000, GK_SUGERIR_COOLDOWN_MS: 90000,
     CAPITAN_AVATAR: "Ⓒ", CAPITAN_SIZE_BONUS: 0,
     REQUIRE_AUTH_TO_PLAY: false, BAN_POLL_INTERVAL_MS: 60000,
-    CAJA_PROBABILIDAD: 0.07, CAJA_MONEDAS_MIN: 50, CAJA_MONEDAS_MAX: 250,
-    MVP_XP: 30, MVP_MONEDAS: 50, TIP_INTERVALO_MS: 240000,
+    CAJA_PROBABILIDAD: 0.07, CAJA_MONEDAS_MIN: 75, CAJA_MONEDAS_MAX: 350,
+    MVP_XP: 50, MVP_MONEDAS: 75, TIP_INTERVALO_MS: 240000,
 
     MIN_PLAYERS_VOTE: 4, PORCENTAJE_VOTOS: 50, COOLDOWN_VOTE: 60000,
     AFK_DETECT_MS: 90000, AFK_KICK_MS: 20000, AFK_WARN_MS: 10000,
@@ -126,18 +155,18 @@ const CONFIG = {
     DISCORD_INVITE: "https://discord.gg/wSmWkKQ7u3",
 
     VERIFICACION_CANAL: "#verificacion-hax", VERIFICACION_EXPIRA_MS: 900000,
-    VERIFICACION_RECOMPENSA_MONEDAS: 150,
+    VERIFICACION_RECOMPENSA_MONEDAS: 200,
     VERIFICACION_HTTP_PUERTO: process.env.VERIFICACION_HTTP_PUERTO || 8788,
     VERIFICACION_HTTP_SECRETO: process.env.VERIFICACION_HTTP_SECRETO,
 
     BAN_DIAS_NORMAL: 3, BAN_DIAS_LOW: 1, WARN_MAX: 3,
     VOTEKICK_MIN_VOTOS: 20, VOTEKICK_DURACION_MS: 1800000, VOTEMUTE_DURACION_MS: 1800000,
     BACKUP_INTERVAL_MS: 1800000, BACKUPS_A_CONSERVAR: 20,
-    MISION_GOLES_OBJETIVO: 3, MISION_RECOMPENSA_MONEDAS: 80, MISION_RECOMPENSA_XP: 50,
-    MISION_SEMANAL_PARTIDOS_OBJETIVO: 10, MISION_SEMANAL_RECOMPENSA_MONEDAS: 300, MISION_SEMANAL_RECOMPENSA_XP: 150,
-    MAX_MONEDA: 500, MAX_BLACKJACK: 500,
+    MISION_GOLES_OBJETIVO: 3, MISION_RECOMPENSA_MONEDAS: 100, MISION_RECOMPENSA_XP: 75,
+    MISION_SEMANAL_PARTIDOS_OBJETIVO: 10, MISION_SEMANAL_RECOMPENSA_MONEDAS: 400, MISION_SEMANAL_RECOMPENSA_XP: 200,
+    MAX_MONEDA: 750, MAX_BLACKJACK: 500,
     CLAN_CREAR_COSTO: 300, CLAN_MAX_MIEMBROS: 8, CLAN_XP_POR_VICTORIA: 15, CLAN_XP_BASE_NIVEL: 200,
-    STREAK_BONUS_MONEDAS: 15, STREAK_BONUS_MAX_DIAS: 10,
+    STREAK_BONUS_MONEDAS: 25, STREAK_BONUS_MAX_DIAS: 10,
     CMD_COOLDOWN_MS: 300, CLAN_INVITACION_TTL_MS: 300000,
     RULETA_VERDE_PAYOUT: 33, RULETA_ROJO_NEGRO_PAYOUT: 2,
 };
@@ -218,7 +247,7 @@ const ANUNCIOS = [
     "⚔️ c [mensaje] para hablar solo con tu clan", "🧤 !gk te reserva como arquero",
 ];
 const ANUNCIOS_DISCORD = [
-    `⚡ Unite a nuestro Discord: ${CONFIG.DISCORD_INVITE}`,
+    `${EMOJIS.checkered} Unite a nuestro Discord: ${CONFIG.DISCORD_INVITE}`,
     `🔗 Verificá tu cuenta: !verificacion y entrá al canal #verificacion-hax`,
 ];
 const TIPS_SALA = [
@@ -229,13 +258,13 @@ const TIPS_SALA = [
     "💡 Ganá un 1 vs 3 y te llevás un logro secreto.", "💡 Gastá las monedas en !tienda",
 ];
 const FRASES_GOL_TITULOS = [
-    "⚽ ¡GOOOL!", "⚽ ¡GOLAZO!", "🥅 ¡A LA RED!", "🎯 ¡DEFINICIÓN PERFECTA!", "💥 ¡MISIL AL ARCO!",
+    `${EMOJIS.soccer} ${EMOJIS.sparkles} GOOOL!`, `${EMOJIS.soccer} ${EMOJIS.fire} GOLAZO!`, "🥅 ¡A LA RED!", "🎯 ¡DEFINICIÓN PERFECTA!", "💥 ¡MISIL AL ARCO!",
     "🚀 ¡IMPOSIBLE PARA EL ARQUERO!", "🔥 ¡QUÉ GOL!", "🌟 ¡BRILLANTE DEFINICIÓN!", "🎉 ¡SE ABRE EL MARCADOR!",
     "⚡ ¡NO PERDONÓ!", "💣 ¡BOMBAZO!", "🎊 ¡EL ESTADIO EXPLOTA!", "🏆 ¡OTRO MÁS PARA LA CUENTA!", "📣 ¡GRÍTALO!",
     "💫 ¡OBRA DE ARTE!", "🐐 ¡GRAN DEFINICIÓN!", "🧉 ¡GOLAZO DE CALIDAD!", "🔥 ¡QUÉ ZURDAZO!",
     "🎆 ¡SE PRENDIÓ FUEGO LA CANCHA!", "🥶 ¡FRÍO, MUY FRÍO PARA EL ARQUERO!",
 ];
-const FRASES_ARRANQUE_PARTIDO = ["🏟️ Comienza el partido", "⚽ Kickoff", "🏁 Arrancamos", "🎬 Rodando la pelota", "🔥 En marcha"];
+const FRASES_ARRANQUE_PARTIDO = ["🏟️ Comienza el partido", `${EMOJIS.soccer} Kickoff`, "🏁 Arrancamos", "🎬 Rodando la pelota", "🔥 En marcha"];
 const MAPAS_BASE = { entrenamiento: `{"name":"Entrenamiento","width":865,"height":450,"bg":{"type":"grass","color":"434343"},"vertexes":[{"x":-417,"y":-225,"bCoef":0.5},{"x":417,"y":-225,"bCoef":0.5},{"x":417,"y":225,"bCoef":0.5},{"x":-417,"y":225,"bCoef":0.5}],"segments":[{"v0":0,"v1":1,"color":"555555"},{"v0":1,"v1":2,"color":"555555"},{"v0":2,"v1":3,"color":"555555"},{"v0":3,"v1":0,"color":"555555"}],"goals":[{"p0":[-417,-70],"p1":[-417,70],"team":"red"},{"p0":[417,-70],"p1":[417,70],"team":"blue"}]}` };
 const MAPAS = { ...MAPAS_BASE, ...require("./mapas") };
 
@@ -332,29 +361,29 @@ function mantenerPelotaEnCancha(ballPosition) {
     if (STATE.curvaEnCurso) finalizarCurva();
     logMsg('errors.log', `[${ROOM_ID}] Pelota fuera corregida en (${ballPosition.x.toFixed(0)}, ${ballPosition.y.toFixed(0)})`);
 }
-function msgBox(t, l, c = 0xFFFFFF, s = "small", so = 2, ti = null) { sendAnnouncement([`${t}`, "─────────────", ...l].join("\n"), ti, c, s, so); }
+function msgBox(t, l, c = COLORES.blanco, s = "small", so = 2, ti = null) { sendAnnouncement([`${t}`, "─────────────", ...l].join("\n"), ti, c, s, so); }
 function anchoVisual(t) { let a = 0; for (const ch of Array.from(t)) a += ch.codePointAt(0) >= 0x1100 ? 2 : 1; return a; }
-function msgCaja(t, l, c = 0xFFFFFF, s = "small-bold", so = 1, ti = null) {
+function msgCaja(t, l, c = COLORES.blanco, s = "small-bold", so = 1, ti = null) {
     const am = Math.max(anchoVisual(t), ...l.map(anchoVisual));
     const ab = Math.min(64, Math.max(20, am));
     const B = "─".repeat(ab);
     sendAnnouncement([`┌${B}┐`, t, `├${B}┤`, ...l, `└${B}┘`].join("\n"), ti, c, s, so);
 }
-function msgSmall(t, ti = null, c = 0xFFFFFF, s = "small", so = 0) { sendAnnouncement(`✦ ${t}`, ti, c, s, so); }
-function msgMini(t, ti = null, c = 0xFFFFFF, so = 0) { sendAnnouncement(t, ti, c, "small", so); }
-function msgArrow(t, l, ti = null, c = 0xFFFFFF, so = 1) { sendAnnouncement(`${t}\n   ╰→ ${l}`, ti, c, "small-bold", so); }
+function msgSmall(t, ti = null, c = COLORES.blanco, s = "small", so = 0) { sendAnnouncement(`✦ ${t}`, ti, c, s, so); }
+function msgMini(t, ti = null, c = COLORES.blanco, so = 0) { sendAnnouncement(t, ti, c, "small", so); }
+function msgArrow(t, l, ti = null, c = COLORES.blanco, so = 1) { sendAnnouncement(`${t}\n   ╰→ ${l}`, ti, c, "small-bold", so); }
 function anunciarGol(t, team, gn, an, vk, sc, fl = null) {
     const mt = sc ? `${sc.red}-${sc.blue}` : "";
     const tt = sc ? `[${formatTime(sc.time)}] ` : "";
     const d = [an ? `asistió ${an}` : null, vk !== null ? `${vk.toFixed(0)} km/h` : null, fl].filter(Boolean).join(" · ");
     const ls = [`${tt}${t} ${gn} · ${mt}`]; if (d) ls.push(`↳ ${d}`);
-    sendAnnouncement(ls.join("\n"), null, team === 1 ? 0xFF3366 : 0x00BFFF, "bold", 2);
+    sendAnnouncement(ls.join("\n"), null, team === 1 ? COLORES.equipo_rojo : COLORES.equipo_azul, "bold", 2);
 }
-function msgError(t, ti = null) { sendAnnouncement(`❌ ${t}`, ti, 0xFF3366, "small", 0); }
-function msgSuccess(t, ti = null) { sendAnnouncement(`✅ ${t}`, ti, 0x00FF88, "small", 1); }
-function msgWarn(t, ti = null) { sendAnnouncement(`⚠️ ${t}`, ti, 0xFFAA00, "small", 0); }
-function msgInfo(t, ti = null) { sendAnnouncement(`💡 ${t}`, ti, 0x00BFFF, "small", 0); }
-function msgGame(t, ti = null, c = 0xFFFFFF, so = 1) { sendAnnouncement(`⚽ ${t}`, ti, c, "small", so); }
+function msgError(t, ti = null) { sendAnnouncement(`❌ ${t}`, ti, COLORES.error, "small", 0); }
+function msgSuccess(t, ti = null) { sendAnnouncement(`✅ ${t}`, ti, COLORES.exito, "small", 1); }
+function msgWarn(t, ti = null) { sendAnnouncement(`⚠️ ${t}`, ti, COLORES.advertencia, "small", 0); }
+function msgInfo(t, ti = null) { sendAnnouncement(`💡 ${t}`, ti, COLORES.info, "small", 0); }
+function msgGame(t, ti = null, c = COLORES.blanco, so = 1) { sendAnnouncement(`⚽ ${t}`, ti, c, "small", so); }
 function footerRanking() { return `📊 Sobre ${Object.keys(STATE.baseDatos).length} jugadores`; }
 function validarCantidad(c, min = 0, max = Infinity) { return !isNaN(c) && c >= min && c <= max; }
     try { return op(); } catch (e) { logMsg('errors.log', `[${ROOM_ID}] SafeOp: ${e.message}`); return fb; }function limpiarCache() {
@@ -576,7 +605,7 @@ function verificarMisionDiaria(player, s, g) {
     if (s.misiones.goles >= CONFIG.MISION_GOLES_OBJETIVO && !s.misiones.completadas.includes("goles_dia")) {
         s.misiones.completadas.push("goles_dia"); s.monedas += CONFIG.MISION_RECOMPENSA_MONEDAS;
         darXP(player, CONFIG.MISION_RECOMPENSA_XP);
-        msgSmall(`🎯 Misión del día · +${CONFIG.MISION_RECOMPENSA_MONEDAS}💰 +${CONFIG.MISION_RECOMPENSA_XP}XP`, player.id, 0xFFD700, "small-bold", 1);
+        msgSmall(`🎯 Misión del día · +${CONFIG.MISION_RECOMPENSA_MONEDAS}💰 +${CONFIG.MISION_RECOMPENSA_XP}XP`, player.id, COLORES.oro, "small-bold", 1);
     }
     markDirty(getPlayerKey(player));
 }
@@ -591,7 +620,7 @@ function verificarMisionSemanal(player, s) {
     if (s.misionSemanal.partidos >= CONFIG.MISION_SEMANAL_PARTIDOS_OBJETIVO && !s.misionSemanal.completada) {
         s.misionSemanal.completada = true; s.monedas += CONFIG.MISION_SEMANAL_RECOMPENSA_MONEDAS;
         darXP(player, CONFIG.MISION_SEMANAL_RECOMPENSA_XP);
-        msgSmall(`🗓️🏅 Semana redonda +${CONFIG.MISION_SEMANAL_RECOMPENSA_MONEDAS}💰`, player.id, 0xFFD700, "small-bold", 1);
+        msgSmall(`🗓️🏅 Semana redonda +${CONFIG.MISION_SEMANAL_RECOMPENSA_MONEDAS}💰`, player.id, COLORES.oro, "small-bold", 1);
     }
     markDirty(getPlayerKey(player));
 }
@@ -731,7 +760,7 @@ function darBadgePorKey(k, bid, nm, ti = null) {
     s.badges.push(bid); invalidarCache("badges", k);
     const nl = BADGE_NOMBRES[bid] || bid.replace(/_/g, " ");
     const txt = ti ? `🏅✨ ¡Nuevo logro! ${BADGES[bid] || "🏆"} ${nl}` : `🏅✨ ${nm} desbloqueó ${BADGES[bid] || "🏆"} ${nl}`;
-    msgSmall(txt, ti, 0xFFD700, "small-bold", 1);
+    msgSmall(txt, ti, COLORES.oro, "small-bold", 1);
     markDirty(k);
 }
 function darBadge(p, bid) { if (!p) return; darBadgePorKey(p.key || getPlayerKey(p), bid, p.name, p.id); }
@@ -755,7 +784,7 @@ function confirmarVerificacionDiscord(cod, dId = null, dTag = null) {
     s.monedas += CONFIG.VERIFICACION_RECOMPENSA_MONEDAS;
     if (!s.badges.includes("fair_play") && s.fair_play >= 90) darBadgePorKey(p.key, "fair_play", s.nombre_actual);
     markDirty(p.key);
-    if (STATE.room?.getPlayer(p.playerId)) msgBox(`✅ ¡DISCORD VERIFICADO!`, [`+${CONFIG.VERIFICACION_RECOMPENSA_MONEDAS}💰`], 0x00FF88, "small-bold", 2, p.playerId);
+    if (STATE.room?.getPlayer(p.playerId)) msgBox(`✅ ¡DISCORD VERIFICADO!`, [`+${CONFIG.VERIFICACION_RECOMPENSA_MONEDAS}💰`], COLORES.exito, "small-bold", 2, p.playerId);
     notificarMensaje(`✅ **${p.nombre}** verificó Discord`);
     return true;
 }
@@ -1215,20 +1244,20 @@ function iniciarVotacion(tipo, target, votante) {
     STATE.votaciones[tipo] = { target, inicio: Date.now(), needed, token };
     STATE.votos[tipo] = { [votante.id]: true };
     const em = { expulsar: "🚷", kick30: "🚷", mute30: "🤫" }[tipo] || "🗳️";
-    sendAnnouncement(`${em} VOTACIÓN: ${target.name}\n!votar ${tipo} (${needed} votos)`, null, 0xFFAA00, "small-bold", 2);
-    setTimeout(() => { if (STATE.votaciones[tipo]?.token === token) { STATE.votaciones[tipo] = null; STATE.votos[tipo] = {}; msgSmall(`❌ Votación cancelada`, null, 0xFF3366, "small-bold", 1); } }, CONFIG.COOLDOWN_VOTE);
+    sendAnnouncement(`${em} VOTACIÓN: ${target.name}\n!votar ${tipo} (${needed} votos)`, null, COLORES.advertencia, "small-bold", 2);
+    setTimeout(() => { if (STATE.votaciones[tipo]?.token === token) { STATE.votaciones[tipo] = null; STATE.votos[tipo] = {}; msgSmall(`❌ Votación cancelada`, null, COLORES.error, "small-bold", 1); } }, CONFIG.COOLDOWN_VOTE);
 }
 function votar(tipo, votante) {
     if (!STATE.votaciones[tipo]) return msgError("No hay votación", votante.id);
     if (STATE.votos[tipo][votante.id]) return msgError("Ya votaste", votante.id);
     STATE.votos[tipo][votante.id] = true;
     const n = STATE.votaciones[tipo].needed, v = Object.keys(STATE.votos[tipo]).length;
-    msgSmall(`🗳️ ${votante.name} votó (${v}/${n})`, null, 0xFFAA00, "small-bold", 1);
+    msgSmall(`🗳️ ${votante.name} votó (${v}/${n})`, null, COLORES.advertencia, "small-bold", 1);
     if (v >= n) {
         const t = STATE.votaciones[tipo].target;
-        if (tipo === "expulsar") { STATE.room.kickPlayer(t.id, "Expulsado", false); msgBox(`🚷 ¡EXPULSADO!`, [`${t.name}`], 0xFF3366, "small-bold", 2); }
-        else if (tipo === "kick30") { const s = STATE.baseDatos[getPlayerKey(t)]; if (s) aplicarBanGlobal(getPlayerKey(t), CONFIG.VOTEKICK_DURACION_MS); STATE.room.kickPlayer(t.id, "🚷 Votekickeado (30 min)", false); msgBox(`🚷 ¡VOTEKICK!`, [`${t.name}`, `30 min`], 0xFF3366, "small-bold", 2); }
-        else if (tipo === "mute30") { const k = getPlayerKey(t); STATE.mutesTemporales = STATE.mutesTemporales.filter(m => m.auth !== k); STATE.mutesTemporales.push({ auth: k, timestamp: Date.now(), duracion: CONFIG.VOTEMUTE_DURACION_MS }); msgBox(`🤫 ¡VOTEMUTE!`, [`${t.name}`, `30 min`], 0xFFAA00, "small-bold", 2); }
+        if (tipo === "expulsar") { STATE.room.kickPlayer(t.id, "Expulsado", false); msgBox(`🚷 ¡EXPULSADO!`, [`${t.name}`], COLORES.error, "small-bold", 2); }
+        else if (tipo === "kick30") { const s = STATE.baseDatos[getPlayerKey(t)]; if (s) aplicarBanGlobal(getPlayerKey(t), CONFIG.VOTEKICK_DURACION_MS); STATE.room.kickPlayer(t.id, "🚷 Votekickeado (30 min)", false); msgBox(`🚷 ¡VOTEKICK!`, [`${t.name}`, `30 min`], COLORES.error, "small-bold", 2); }
+        else if (tipo === "mute30") { const k = getPlayerKey(t); STATE.mutesTemporales = STATE.mutesTemporales.filter(m => m.auth !== k); STATE.mutesTemporales.push({ auth: k, timestamp: Date.now(), duracion: CONFIG.VOTEMUTE_DURACION_MS }); msgBox(`🤫 ¡VOTEMUTE!`, [`${t.name}`, `30 min`], COLORES.advertencia, "small-bold", 2); }
         STATE.votaciones[tipo] = null; STATE.votos[tipo] = {};
     }
 }
@@ -1275,13 +1304,13 @@ function checkAFKKickAutomatico() {
         const t = ahora - desde, j = STATE.room.getPlayer(id);
         if (!j || j.admin) return;
         if (t >= CONFIG.AFK_KICK_MS) { STATE.room.kickPlayer(id, "AFK", false); STATE.afkPlayers.delete(id); delete STATE.afkDesde[id]; STATE.afkAvisado30s.delete(id); }
-        else if (!STATE.afkAvisado30s.has(id) && CONFIG.AFK_KICK_MS - t <= CONFIG.AFK_WARN_MS) { STATE.afkAvisado30s.add(id); msgSmall(`${j.name}, 30s antes del kick por AFK`, id, 0xFF3366, "small-bold", 1); }
+        else if (!STATE.afkAvisado30s.has(id) && CONFIG.AFK_KICK_MS - t <= CONFIG.AFK_WARN_MS) { STATE.afkAvisado30s.add(id); msgSmall(`${j.name}, 30s antes del kick por AFK`, id, COLORES.error, "small-bold", 1); }
     });
 }
 function kickAFKs(adminName) {
     let k = 0;
     STATE.afkPlayers.forEach(id => { const p = STATE.room.getPlayer(id); if (p && !p.admin) { STATE.room.kickPlayer(id, "AFK", false); k++; } delete STATE.afkDesde[id]; STATE.afkAvisado30s.delete(id); });
-    STATE.afkPlayers.clear(); msgBox(`🚷 AFKs Kickeados`, [`${k} jugadores`, `Por: ${adminName}`], 0xFF3366, "small-bold", 2);
+    STATE.afkPlayers.clear(); msgBox(`🚷 AFKs Kickeados`, [`${k} jugadores`, `Por: ${adminName}`], COLORES.error, "small-bold", 2);
 }
 function handleFairPlay(sc) {
     if (!STATE.fairPlayActivo) return;
@@ -1289,9 +1318,9 @@ function handleFairPlay(sc) {
     setTimeout(() => {
         if (STATE.partidoEnCurso) return;
         const ps = STATE.room.getPlayerList().filter(p => p.team !== 0);
-        if (d === 1) { ps.forEach(p => { if (p.team === 1) STATE.room.setPlayerTeam(p.id, 2); else if (p.team === 2) STATE.room.setPlayerTeam(p.id, 1); }); msgBox(`🔄 FairPlay`, [`Dif 1 gol`, `Intercambiados`], 0x00FF88, "small-bold", 0); }
-        else if (d === 2) { shuffleArray(ps).forEach((p, i) => STATE.room.setPlayerTeam(p.id, i % 2 === 0 ? 1 : 2)); msgBox(`🎲 FairPlay`, [`Dif 2`, `Mezclados`], 0x00FF88, "small-bold", 0); }
-        else if (d >= 3) { const { equipo1, equipo2 } = balancearEquiposElo(ps); equipo1.forEach(p => STATE.room.setPlayerTeam(p.id, 1)); equipo2.forEach(p => STATE.room.setPlayerTeam(p.id, 2)); msgBox(`⚖️ FairPlay`, [`Dif 3+`, `Rebalanceados`], 0x00FF88, "small-bold", 0); }
+        if (d === 1) { ps.forEach(p => { if (p.team === 1) STATE.room.setPlayerTeam(p.id, 2); else if (p.team === 2) STATE.room.setPlayerTeam(p.id, 1); }); msgBox(`🔄 FairPlay`, [`Dif 1 gol`, `Intercambiados`], COLORES.exito, "small-bold", 0); }
+        else if (d === 2) { shuffleArray(ps).forEach((p, i) => STATE.room.setPlayerTeam(p.id, i % 2 === 0 ? 1 : 2)); msgBox(`🎲 FairPlay`, [`Dif 2`, `Mezclados`], COLORES.exito, "small-bold", 0); }
+        else if (d >= 3) { const { equipo1, equipo2 } = balancearEquiposElo(ps); equipo1.forEach(p => STATE.room.setPlayerTeam(p.id, 1)); equipo2.forEach(p => STATE.room.setPlayerTeam(p.id, 2)); msgBox(`⚖️ FairPlay`, [`Dif 3+`, `Rebalanceados`], COLORES.exito, "small-bold", 0); }
     }, 2000);
 }
 function handleGanaSigue(gan) {
@@ -1301,7 +1330,7 @@ function handleGanaSigue(gan) {
         const per = gan === 1 ? 2 : 1;
         const specs = STATE.room.getPlayerList().filter(p => p.team === 0 && !STATE.afkPlayers.has(p.id));
         STATE.room.getPlayerList().filter(p => p.team === per).forEach(p => STATE.room.setPlayerTeam(p.id, 0));
-        if (specs.length >= 2) { specs.slice(0, 4).forEach((p, i) => STATE.room.setPlayerTeam(p.id, i % 2 === 0 ? per : gan)); msgBox(`⏭️ Gana Sigue`, [`Perdedores salen`], 0xFFAA00, "small-bold", 0); }
+        if (specs.length >= 2) { specs.slice(0, 4).forEach((p, i) => STATE.room.setPlayerTeam(p.id, i % 2 === 0 ? per : gan)); msgBox(`⏭️ Gana Sigue`, [`Perdedores salen`], COLORES.advertencia, "small-bold", 0); }
     }, 3000);
 }
 function calcularVelocidadTiro() { try { const b = STATE.room.getDiscProperties(0); return (Math.sqrt((b.xspeed || 0) ** 2 + (b.yspeed || 0) ** 2) * 60 / CONFIG.VELOCIDAD_PX_POR_METRO) * 3.6; } catch (e) { return null; } }
@@ -1345,7 +1374,7 @@ function iniciarAchiqueGradual(pid, rD, iM, term, tk) {
 }
 function calcularPosesion() {
     const t = STATE.equipoRojoPosesion + STATE.equipoAzulPosesion;
-    if (t > 0) sendAnnouncement(`📊 Posesión: 🔴 ${((STATE.equipoRojoPosesion / t) * 100).toFixed(1)}% · ${((STATE.equipoAzulPosesion / t) * 100).toFixed(1)}% 🔵`, null, 0x00BFFF, "small-bold", 1);
+    if (t > 0) sendAnnouncement(`📊 Posesión: 🔴 ${((STATE.equipoRojoPosesion / t) * 100).toFixed(1)}% · ${((STATE.equipoAzulPosesion / t) * 100).toFixed(1)}% 🔵`, null, COLORES.info, "small-bold", 1);
 }
 function detectArquero(pl) {
     const ts = pl || STATE.room.getPlayerList();
@@ -1378,7 +1407,7 @@ function sugerirGkAJugadoresEnArco(pl) {
         if (d > CONFIG.GK_SUGERIR_ZONA_DISTANCIA) { delete STATE.zonaArcoDesde[p.id]; return; }
         if (!STATE.zonaArcoDesde[p.id]) STATE.zonaArcoDesde[p.id] = ahora;
         const t = ahora - STATE.zonaArcoDesde[p.id], u = STATE.zonaArcoUltimoAviso[p.id] || 0;
-        if (t >= CONFIG.GK_SUGERIR_TIEMPO_MS && ahora - u >= CONFIG.GK_SUGERIR_COOLDOWN_MS) { msgSmall(`🧤 Usá !gk si querés atajar oficial`, p.id, 0x00BFFF, "small-bold", 0); STATE.zonaArcoUltimoAviso[p.id] = ahora; }
+        if (t >= CONFIG.GK_SUGERIR_TIEMPO_MS && ahora - u >= CONFIG.GK_SUGERIR_COOLDOWN_MS) { msgSmall(`🧤 Usá !gk si querés atajar oficial`, p.id, COLORES.info, "small-bold", 0); STATE.zonaArcoUltimoAviso[p.id] = ahora; }
     });
     for (const k of Object.keys(STATE.zonaArcoDesde)) if (!ids.has(Number(k))) delete STATE.zonaArcoDesde[k];
 }
@@ -1423,18 +1452,18 @@ function completarEquiposAutomatico(sa, rA, aA, eS) {
             const dR = Math.abs((mR + mm) / (nR + 1) - pA), dA = Math.abs(pR - (mA + mm) / (nA + 1));
             if (dR === dA) vR = nR < nA || (nR === nA && Math.random() < 0.5); else vR = dR < dA;
         } else vR = lR > 0;
-        if (vR) { STATE.room.setPlayerTeam(j.id, 1); lR--; nR++; mR += mm; sendAnnouncement(`『𝗕𝗮𝗵𝗜𝗔』 → ${j.name} al rojo`, null, 0x00BFFF, "small", 0); }
-        else { STATE.room.setPlayerTeam(j.id, 2); lA--; nA++; mA += mm; sendAnnouncement(`『𝗕𝗮𝗵𝗜𝗔』 → ${j.name} al azul`, null, 0x00BFFF, "small", 0); }
+        if (vR) { STATE.room.setPlayerTeam(j.id, 1); lR--; nR++; mR += mm; sendAnnouncement(`『𝗕𝗮𝗵𝗜𝗔』 → ${j.name} al rojo`, null, COLORES.info, "small", 0); }
+        else { STATE.room.setPlayerTeam(j.id, 2); lA--; nA++; mA += mm; sendAnnouncement(`『𝗕𝗮𝗵𝗜𝗔』 → ${j.name} al azul`, null, COLORES.info, "small", 0); }
     }
 }
 function programarEventoAleatorio() {
     if (STATE.eventoTimer) clearTimeout(STATE.eventoTimer);
     STATE.eventoTimer = setTimeout(() => {
-        if (STATE.partidoEnCurso && !STATE.eventoGolX2Activo) { STATE.eventoGolX2Activo = true; msgGame("🎲 El próximo gol vale x2 monedas", null, 0xFFD700, 2); }
+        if (STATE.partidoEnCurso && !STATE.eventoGolX2Activo) { STATE.eventoGolX2Activo = true; msgGame("🎲 El próximo gol vale x2 monedas", null, COLORES.oro, 2); }
         programarEventoAleatorio();
     }, 240000 + Math.floor(Math.random() * 180000));
 }
-function anunciarModoAutomatizado() { if (!CONFIG.AUTOMATED_MODE_ANNOUNCE || !STATE.room) return; sendAnnouncement("⚙️ Modo auto: mapas y equipos se arman solos", null, 0x00BFFF, "small", 0); }
+function anunciarModoAutomatizado() { if (!CONFIG.AUTOMATED_MODE_ANNOUNCE || !STATE.room) return; sendAnnouncement("⚙️ Modo auto: mapas y equipos se arman solos", null, COLORES.info, "small", 0); }
 function ejecutarAutomatizado(f) { if (!STATE.automatizadoActivado) return; try { _ejecutarAutomatizadoInterno(f); } catch (e) { logMsg('errors.log', `[${ROOM_ID}] Error auto: ${e.message}`); } }
 function _ejecutarAutomatizadoInterno(forzarMezcla) {
     STATE.jueganTodosActivo = true; STATE.fairPlayActivo = false;
@@ -1534,7 +1563,7 @@ function asignarCamisetas() {
     while (c2.name === c1.name && i < 5) { c2 = CAMISETAS[Math.floor(Math.random() * CAMISETAS.length)]; i++; }
     safeOperation(() => { STATE.room.setTeamColors(1, c1.angle ?? 90, textoContrasteCamiseta(c1.colors[0]), c1.colors); STATE.room.setTeamColors(2, c2.angle ?? 90, textoContrasteCamiseta(c2.colors[0]), c2.colors); });
     STATE.ultimasCamisetas = { cam1: c1, cam2: c2 };
-    msgSmall(`🎽 Camisetas: ${c1.name} vs ${c2.name}`, null, 0xFFD700, "small-bold", 1);
+    msgSmall(`🎽 Camisetas: ${c1.name} vs ${c2.name}`, null, COLORES.oro, "small-bold", 1);
 }
 function marcarCapitan(pid, esC) {
     if (esC) { safeOperation(() => STATE.room.setPlayerAvatar(pid, CONFIG.CAPITAN_AVATAR)); if (CONFIG.CAPITAN_SIZE_BONUS > 0) { const p = STATE.room.getPlayer(pid); if (p) aplicarTamanoPersistente(p); } }
@@ -1558,7 +1587,7 @@ function asegurarCapitan(t, { anunciar = false } = {}) {
     if (anunciar) msgSmall(`${CONFIG.CAPITAN_AVATAR} ${n.name} capitán del ${t === 1 ? "rojo 🔴" : "azul 🔵"}`, null, t === 1 ? 0xFF3366 : 0x00BFFF, "small-bold", 0);
     return n;
 }
-function asignarCapitanes() { limpiarCapitanes(); const r = asegurarCapitan(1), a = asegurarCapitan(2); const p = []; if (r) p.push(`🔴 ${r.name}`); if (a) p.push(`🔵 ${a.name}`); if (p.length) msgSmall(`${CONFIG.CAPITAN_AVATAR} Capitanes — ${p.join("  vs  ")}`, null, 0xFFD700, "small-bold", 1); }
+function asignarCapitanes() { limpiarCapitanes(); const r = asegurarCapitan(1), a = asegurarCapitan(2); const p = []; if (r) p.push(`🔴 ${r.name}`); if (a) p.push(`🔵 ${a.name}`); if (p.length) msgSmall(`${CONFIG.CAPITAN_AVATAR} Capitanes — ${p.join("  vs  ")}`, null, COLORES.oro, "small-bold", 1); }
 function limpiarCapitanes() { for (const t of [1, 2]) { const id = STATE.capitanes[t]; if (id != null) marcarCapitan(id, false); STATE.capitanes[t] = null; } }
 function getStats(p) { if (!p) return null; return STATE.baseDatos[getPlayerKey(p)] || null; }
 function initStats(p) {
@@ -1646,7 +1675,7 @@ function dejarArquero(p) {
     if (STATE.gkReservado[1] === p.id) STATE.gkReservado[1] = null;
     if (STATE.gkReservado[2] === p.id) STATE.gkReservado[2] = null;
     aplicarTamanoPersistente(p);
-    msgMini(`${p.name} colgó los guantes`, p.id, 0x00BFFF, 0);
+    msgMini(`${p.name} colgó los guantes`, p.id, COLORES.info, 0);
 }
 // ── Helpers de ban global ──
 function aplicarBanGlobal(key, ms) {
@@ -1686,7 +1715,7 @@ const commands = {
         if (args[0] === CONFIG.ADMIN_PASSWORD) {
             if (STATE.authIntentos) delete STATE.authIntentos[key];
             STATE.room.setPlayerAdmin(p.id, true);
-            msgBox("👑 Ahora sos admin", [`${p.name} es admin`], 0xFFD700, "small-bold", 2, p.id);
+            msgBox("👑 Ahora sos admin", [`${p.name} es admin`], COLORES.oro, "small-bold", 2, p.id);
             logMsg('auth.log', `[${ROOM_ID}] Login OK: ${p.name} (${key})`);
             auditLog(p, "LOGIN_ADMIN_OK", p.name);
         } else {
@@ -1713,11 +1742,11 @@ const commands = {
         setTimeout(() => aplicarTamanoPersistente(p), 100);
         msgSuccess(`${p.name} entró a la cancha!`, p.id);
     },
-    "!ver": (p) => { STATE.room.setPlayerTeam(p.id, 0); msgSmall(`👀 ${p.name} a suplentes`, p.id, 0xFFAA00, "small", 1); },
+    "!ver": (p) => { STATE.room.setPlayerTeam(p.id, 0); msgSmall(`👀 ${p.name} a suplentes`, p.id, COLORES.advertencia, "small", 1); },
     "!tiempo": (p) => {
         if (!STATE.partidoEnCurso || !STATE.ultimoMarcadorConocido) return msgError("Sin partido activo", p.id);
         const t = Math.max(0, (STATE.ultimoMarcadorConocido.timeLimit * 60) - STATE.ultimoMarcadorConocido.time);
-        sendAnnouncement(`⏱️ ${formatTime(t)} · ${STATE.ultimoMarcadorConocido.red}-${STATE.ultimoMarcadorConocido.blue}`, p.id, 0x00BFFF, "small-bold", 0);
+        sendAnnouncement(`⏱️ ${formatTime(t)} · ${STATE.ultimoMarcadorConocido.red}-${STATE.ultimoMarcadorConocido.blue}`, p.id, COLORES.info, "small-bold", 0);
     },
     "!equipos": (p) => {
         const ps = STATE.room.getPlayerList();
@@ -1726,7 +1755,7 @@ const commands = {
     "!vivo": (p) => {
         if (!STATE.partidoEnCurso) return msgError("Sin partido", p.id);
         const t = STATE.room.getPlayerList().filter(x => x.team !== 0).map(pl => { const ms = STATE.matchStats[pl.id] || { goles: 0, asistencias: 0 }; return `${pl.team === 1 ? "🔴" : "🔵"} ${pl.name}: ${ms.goles}G ${ms.asistencias}A`; }).join("\n");
-        sendAnnouncement(`📊 STATS EN VIVO:\n${t || "Sin stats"}`, p.id, 0x00BFFF, "small-bold", 0);
+        sendAnnouncement(`📊 STATS EN VIVO:\n${t || "Sin stats"}`, p.id, COLORES.info, "small-bold", 0);
     },
     "!perfil": (p, args) => {
         let target = p, key = getPlayerKey(p);
@@ -1750,7 +1779,7 @@ const commands = {
         const s = STATE.baseDatos[getPlayerKey(p)], t = obtenerTitulo(p);
         const sig = getSiguienteRango(s.titulo || "bronce1");
         const prog = sig ? ` · faltan ${Math.max(0, sig.req - s.mmr)} ELO para ${sig.nombre}` : " · rango máximo";
-        sendAnnouncement(`${formatTituloDisplay(t)} · ${p.name} · ELO ${s.mmr} · Nv ${s.nivel}${prog}`, p.id, t.color, "small", 0);
+        sendAnnouncement(`${formatTituloDisplay(t)} • ${p.name} · ELO ${s.mmr} · Nv ${s.nivel}${prog}`, p.id, t.color, "small", 0);
     },
     "!vs": (p, args) => {
         if (!args.length) return msgError("Uso: !vs [jugador]", p.id);
@@ -1761,27 +1790,27 @@ const commands = {
         const h = s.historial_vs?.[getPlayerKey(target)];
         if (!h || (h.victorias + h.derrotas + h.empates) === 0) return msgInfo(`Todavía no jugaste contra ${target.name}`, p.id);
         const tot = h.victorias + h.derrotas + h.empates;
-        sendAnnouncement(`⚔️ ${p.name} VS ${target.name}\n🟢 ${h.victorias}V 🔴 ${h.derrotas}D ⚪ ${h.empates}E (${tot}, ${Math.round((h.victorias / tot) * 100)}%)`, p.id, 0xFFAA00, "small", 0);
+        sendAnnouncement(`⚔️ ${p.name} VS ${target.name}\n🟢 ${h.victorias}V 🔴 ${h.derrotas}D ⚪ ${h.empates}E (${tot}, ${Math.round((h.victorias / tot) * 100)}%)`, p.id, COLORES.advertencia, "small", 0);
     },
     "!tabla": (p) => {
         const top = Object.values(STATE.baseDatos).sort((a, b) => b.mmr - a.mmr).slice(0, 5).map((s, i) => `${i + 1}. ${getTituloSeguro(s.titulo).nombre} ${s.nombre_actual} - ${s.mmr}`);
         top.push(footerRanking());
-        msgCaja(`🏆 Top 5 · Temporada ${STATE.TEMPORADA_ACTUAL}`, top, 0xFFD700, "small", 0, p.id);
+        msgCaja(`🏆 Top 5 · Temporada ${STATE.TEMPORADA_ACTUAL}`, top, COLORES.oro, "small", 0, p.id);
     },
-    "!goles": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.goles > 0).sort((a, b) => b.goles - a.goles).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual} — ⚽ ${s.goles}`); msgBox("⚽ TOP GOLEADORES", t.length ? [...t, footerRanking()] : ["Nadie metió goles"], 0xFFD700, "small", 0, p.id); },
-    "!asist": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.asistencias > 0).sort((a, b) => b.asistencias - a.asistencias).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual} — 🎯 ${s.asistencias}`); msgBox("🎯 TOP ASISTIDORES", t.length ? [...t, footerRanking()] : ["Sin asistencias"], 0x00BFFF, "small", 0, p.id); },
-    "!figuras": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.mvps > 0).sort((a, b) => b.mvps - a.mvps).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual} — 🌟 ${s.mvps}`); msgBox("🌟 TOP MVPS", t.length ? [...t, footerRanking()] : ["Nadie fue MVP"], 0xFF66CC, "small", 0, p.id); },
-    "!partidos": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.partidos > 0).sort((a, b) => b.partidos - a.partidos).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual} — 🎮 ${s.partidos}`); msgBox("🎮 TOP PARTIDAS", t.length ? [...t, footerRanking()] : ["Sin partidos"], 0x00FF88, "small", 0, p.id); },
-    "!vallas": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.vallas_invictas > 0).sort((a, b) => b.vallas_invictas - a.vallas_invictas).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual} — 🧤 ${s.vallas_invictas}`); msgBox("🧤 VALLAS INVICTAS", t.length ? [...t, footerRanking()] : ["Sin vallas"], 0x00CED1, "small", 0, p.id); },
-    "!atajadas": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.atajadas > 0).sort((a, b) => b.atajadas - a.atajadas).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual} — 🧤✋ ${s.atajadas}`); msgBox("🧤✋ TOP ATAJADAS", t.length ? [...t, footerRanking()] : ["Sin atajadas"], 0x1E90FF, "small", 0, p.id); },
-    "!horas": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.segundos_jugados > 0).sort((a, b) => b.segundos_jugados - a.segundos_jugados).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual} — ⏳ ${formatTime(s.segundos_jugados)}`); msgBox("⏳ TOP TIEMPO", t.length ? [...t, footerRanking()] : ["Sin datos"], 0xFFAA00, "small", 0, p.id); },
-    "!monedas": (p) => { const t = Object.values(STATE.baseDatos).sort((a, b) => b.monedas - a.monedas).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual} — 💰 ${s.monedas}`); msgBox("💰 TOP MONEDAS", t.length ? [...t, footerRanking()] : ["Sin datos"], 0xFFD700, "small", 0, p.id); },
-    "!efec": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.partidos >= 3).sort((a, b) => (b.victorias / b.partidos) - (a.victorias / a.partidos)).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual} — 📊 ${Math.round((s.victorias / s.partidos) * 100)}% (${s.partidos} PJ)`); msgBox("📊 WINRATE (mín. 3)", t.length ? [...t, footerRanking()] : ["Nadie con 3 partidos"], 0x50C878, "small", 0, p.id); },
+    "!goles": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.goles > 0).sort((a, b) => b.goles - a.goles).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual} — ⚽ ${s.goles}`); msgBox(`${EMOJIS.soccer} TOP GOLEADORES`, t.length ? [...t, footerRanking()] : ["Nadie metió goles"], COLORES.oro, "small", 0, p.id); },
+    "!asist": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.asistencias > 0).sort((a, b) => b.asistencias - a.asistencias).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual} — 🎯 ${s.asistencias}`); msgBox("🎯 TOP ASISTIDORES", t.length ? [...t, footerRanking()] : ["Sin asistencias"], COLORES.info, "small", 0, p.id); },
+    "!figuras": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.mvps > 0).sort((a, b) => b.mvps - a.mvps).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual} — 🌟 ${s.mvps}`); msgBox("🌟 TOP MVPS", t.length ? [...t, footerRanking()] : ["Nadie fue MVP"], COLORES.morado, "small", 0, p.id); },
+    "!partidos": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.partidos > 0).sort((a, b) => b.partidos - a.partidos).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual} — 🎮 ${s.partidos}`); msgBox("🎮 TOP PARTIDAS", t.length ? [...t, footerRanking()] : ["Sin partidos"], COLORES.exito, "small", 0, p.id); },
+    "!vallas": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.vallas_invictas > 0).sort((a, b) => b.vallas_invictas - a.vallas_invictas).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual} — 🧤 ${s.vallas_invictas}`); msgBox("🧤 VALLAS INVICTAS", t.length ? [...t, footerRanking()] : ["Sin vallas"], COLORES.azul, "small", 0, p.id); },
+    "!atajadas": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.atajadas > 0).sort((a, b) => b.atajadas - a.atajadas).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual} — 🧤✋ ${s.atajadas}`); msgBox("🧤✋ TOP ATAJADAS", t.length ? [...t, footerRanking()] : ["Sin atajadas"], COLORES.diamante, "small", 0, p.id); },
+    "!horas": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.segundos_jugados > 0).sort((a, b) => b.segundos_jugados - a.segundos_jugados).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual} — ⏳ ${formatTime(s.segundos_jugados)}`); msgBox(`${EMOJIS.clock} TOP TIEMPO`, t.length ? [...t, footerRanking()] : ["Sin datos"], COLORES.advertencia, "small", 0, p.id); },
+    "!monedas": (p) => { const t = Object.values(STATE.baseDatos).sort((a, b) => b.monedas - a.monedas).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual} — 💰 ${s.monedas}`); msgBox("💰 TOP MONEDAS", t.length ? [...t, footerRanking()] : ["Sin datos"], COLORES.oro, "small", 0, p.id); },
+    "!efec": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.partidos >= 3).sort((a, b) => (b.victorias / b.partidos) - (a.victorias / a.partidos)).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual} — 📊 ${Math.round((s.victorias / s.partidos) * 100)}% (${s.partidos} PJ)`); msgBox("📊 WINRATE (mín. 3)", t.length ? [...t, footerRanking()] : ["Nadie con 3 partidos"], COLORES.verde, "small", 0, p.id); },
     "!tienda": (p, args) => {
         const key = getPlayerKey(p), stats = STATE.baseDatos[key];
         if (args[0] === "exclusivo") {
             const lista = Object.entries(TITULOS_EXCLUSIVOS).map(([id, t]) => { const dk = STATE.titulosExclusivos[id]; const d = dk ? (STATE.baseDatos[dk]?.nombre_actual || "??") : "nadie"; return `${t.nombre} — ${t.precio}💰 (dueño: ${d}) → !tienda comprar ${id}`; });
-            return msgCaja("👑 Títulos exclusivos", ["Sólo 1 persona puede tener cada uno", ...lista], 0xFFD700, "small", 0, p.id);
+            return msgCaja("👑 Títulos exclusivos", ["Sólo 1 persona puede tener cada uno", ...lista], COLORES.oro, "small", 0, p.id);
         }
         if (args[0] === "comprar" && args[1]) {
             const id = args[1].toLowerCase();
@@ -1824,7 +1853,7 @@ const commands = {
             const porCat = {};
             Object.entries(TIENDA_ITEMS).forEach(([id, it]) => { const c = it.categoria || "Otros"; (porCat[c] = porCat[c] || []).push(`${it.nombre} — ${it.precio}💰 · ${it.desc}${est(id)}\n   ↳ !tienda comprar ${id}`); });
             const bl = Object.entries(porCat).map(([c, l]) => `▸ ${c}\n${l.join("\n")}`).join("\n\n");
-            sendAnnouncement(`🛒 Tienda · Tenés 💰${stats.monedas}\n\n${bl}\n\n👑 !tienda exclusivo para títulos únicos`, p.id, 0xFFD700, "small", 0);
+            sendAnnouncement(`🛒 Tienda · Tenés 💰${stats.monedas}\n\n${bl}\n\n👑 !tienda exclusivo para títulos únicos`, p.id, COLORES.oro, "small", 0);
         }
     },
     "!enviar": (p, args) => {
@@ -1858,10 +1887,10 @@ const commands = {
         STATE.apuestas[p.id] = { key: k, equipo: team, cantidad: c };
         s.apuestas_realizadas = (s.apuestas_realizadas || 0) + 1;
         if (s.apuestas_realizadas >= 20 && !s.badges.includes("apostador")) darBadge(p, "apostador");
-        msgSmall(`🎰 Apostaste ${c}💰`, p.id, 0xFFD700, "small", 1);
+        msgSmall(`🎰 Apostaste ${c}💰`, p.id, COLORES.oro, "small", 1);
         markDirty(k);
     },
-    "!casino": (p) => { sendAnnouncement(`🎰 CASINO\n\n🪙 !moneda [cant] · 50%: x${CONFIG.CUOTA_APUESTA}\n🃏 !veintiuno [cant] · !pedir/!plantar · x2\n🎡 !ruleta [rojo/negro/verde] [cant] · Rojo/Negro x2 · Verde x${CONFIG.RULETA_VERDE_PAYOUT}\n⚽ !apostar · al final del partido\n⚔️ !duelo [jug] [cant]`, p.id, 0xFFD700, "small", 0); },
+    "!casino": (p) => { sendAnnouncement(`🎰 CASINO\n\n🪙 !moneda [cant] · 50%: x${CONFIG.CUOTA_APUESTA}\n🃏 !veintiuno [cant] · !pedir/!plantar · x2\n🎡 !ruleta [rojo/negro/verde] [cant] · Rojo/Negro x2 · Verde x${CONFIG.RULETA_VERDE_PAYOUT}\n⚽ !apostar · al final del partido\n⚔️ !duelo [jug] [cant]`, p.id, COLORES.oro, "small", 0); },
     "!moneda": (p, args) => {
         if (!args[0]) return msgError("Uso: !moneda [cantidad]", p.id);
         const c = parseInt(args[0], 10);
@@ -1871,8 +1900,8 @@ const commands = {
         s.monedas -= c;
         s.apuestas_realizadas = (s.apuestas_realizadas || 0) + 1;
         if (s.apuestas_realizadas >= 20 && !s.badges.includes("apostador")) darBadge(p, "apostador");
-        if (Math.random() < 0.5) { const pr = Math.round(c * CONFIG.CUOTA_APUESTA); s.monedas += pr; msgBox(`🪙 Cara — ganaste`, [`+${pr}💰`], 0x00FF88, "small", 1, p.id); }
-        else msgSmall(`🪙 Ceca — perdiste ${c}💰`, p.id, 0xFF3366, "small", 1);
+        if (Math.random() < 0.5) { const pr = Math.round(c * CONFIG.CUOTA_APUESTA); s.monedas += pr; msgBox(`🪙 Cara — ganaste`, [`+${pr}💰`], COLORES.exito, "small", 1, p.id); }
+        else msgSmall(`🪙 Ceca — perdiste ${c}💰`, p.id, COLORES.error, "small", 1);
         markDirty(k);
     },
     "!veintiuno": (p, args) => {
@@ -1889,18 +1918,18 @@ const commands = {
         const cart = () => Math.min(11, Math.floor(Math.random() * 10) + 2);
         const mJ = [cart(), cart()], mC = [cart(), cart()];
         const tJ = mJ.reduce((a, b) => a + b, 0);
-        if (tJ === 21) { const pr = Math.round(c * 2.5); s.monedas += pr; markDirty(k); return msgBox(`🃏🔥 ¡BLACKJACK NATURAL!`, [`Tus cartas: ${mJ.join(" + ")} = 21`, `¡Redondo! ${pr}💰`], 0x00FF88, "small", 1, p.id); }
+        if (tJ === 21) { const pr = Math.round(c * 2.5); s.monedas += pr; markDirty(k); return msgBox(`🃏🔥 ¡BLACKJACK NATURAL!`, [`Tus cartas: ${mJ.join(" + ")} = 21`, `¡Redondo! ${pr}💰`], COLORES.exito, "small", 1, p.id); }
         STATE.blackjackActivo[p.id] = { cantidad: c, manoJugador: mJ, manoCasa: mC, key: k, expira: Date.now() + 45000 };
         setTimeout(() => { if (STATE.blackjackActivo[p.id]?.expira && STATE.blackjackActivo[p.id].expira <= Date.now()) resolverBlackjack(p, true); }, 45000);
-        msgBox(`🃏 BLACKJACK`, [`Tus cartas: ${mJ.join(" + ")} = ${tJ}`, `Casa visible: ${mC[0]}`, `!pedir o !plantar`], 0xFFD700, "small", 1, p.id);
+        msgBox(`🃏 BLACKJACK`, [`Tus cartas: ${mJ.join(" + ")} = ${tJ}`, `Casa visible: ${mC[0]}`, `!pedir o !plantar`], COLORES.oro, "small", 1, p.id);
     },
     "!pedir": (p) => {
         const m = STATE.blackjackActivo[p.id]; if (!m) return msgError("No tenés mano activa", p.id);
         m.manoJugador.push(Math.min(11, Math.floor(Math.random() * 10) + 2));
         const t = m.manoJugador.reduce((a, b) => a + b, 0);
-        if (t > 21) { delete STATE.blackjackActivo[p.id]; return msgBox(`🃏 ¡Te pasaste!`, [`Tus cartas: ${m.manoJugador.join(" + ")} = ${t}`, `Perdiste ${m.cantidad}💰`], 0xFF3366, "small", 1, p.id); }
+        if (t > 21) { delete STATE.blackjackActivo[p.id]; return msgBox(`🃏 ¡Te pasaste!`, [`Tus cartas: ${m.manoJugador.join(" + ")} = ${t}`, `Perdiste ${m.cantidad}💰`], COLORES.error, "small", 1, p.id); }
         m.expira = Date.now() + 45000;
-        msgSmall(`🃏 Tus cartas: ${m.manoJugador.join(" + ")} = ${t}`, p.id, 0xFFD700, "small", 0);
+        msgSmall(`🃏 Tus cartas: ${m.manoJugador.join(" + ")} = ${t}`, p.id, COLORES.oro, "small", 0);
     },
     "!plantar": (p) => { if (!STATE.blackjackActivo[p.id]) return msgError("No tenés mano activa", p.id); resolverBlackjack(p, false); },
     "!ruleta": (p, args) => {
@@ -1920,8 +1949,8 @@ const commands = {
         const em = { rojo: "🔴", negro: "⚫", verde: "🟢" };
         let pr = 0;
         if (el === sal) pr = el === "verde" ? c * CONFIG.RULETA_VERDE_PAYOUT : c * CONFIG.RULETA_ROJO_NEGRO_PAYOUT;
-        if (pr > 0) { s.monedas += pr; msgBox(`🎡✨ Salió ${em[sal]} ${sal.toUpperCase()}`, [`¡La pegaste! +${pr}💰`], 0x00FF88, "small", 1, p.id); }
-        else msgSmall(`🎡 Salió ${em[sal]} ${sal.toUpperCase()}, perdiste ${c}💰`, p.id, 0xFF3366, "small", 1);
+        if (pr > 0) { s.monedas += pr; msgBox(`🎡✨ Salió ${em[sal]} ${sal.toUpperCase()}`, [`¡La pegaste! +${pr}💰`], COLORES.exito, "small", 1, p.id); }
+        else msgSmall(`🎡 Salió ${em[sal]} ${sal.toUpperCase()}, perdiste ${c}💰`, p.id, COLORES.error, "small", 1);
         markDirty(k);
     },
     "!duelo": (p, args) => {
@@ -1937,11 +1966,11 @@ const commands = {
         if (STATE.duelosActivos.find(d => d.retado === target.id)) return msgError("Ese jugador ya tiene duelo pendiente", p.id);
         s.monedas -= c; markDirty(k);
         STATE.duelosActivos.push({ retador: p.id, retado: target.id, cantidad: c, retadorKey: k, expira: Date.now() + 30000 });
-        msgBox(`⚔️ ¡DUELO!`, [`${p.name} te retó`, `Apuesta: ${c}💰`, `!aceptar o !rechazar`], 0xFFAA00, "small", 2, target.id);
-        msgBox(`⚔️ ¡DUELO!`, [`Retaste a ${target.name}`, `${c}💰`, `Esperando...`], 0xFFAA00, "small", 2, p.id);
+        msgBox(`⚔️ ¡DUELO!`, [`${p.name} te retó`, `Apuesta: ${c}💰`, `!aceptar o !rechazar`], COLORES.advertencia, "small", 2, target.id);
+        msgBox(`⚔️ ¡DUELO!`, [`Retaste a ${target.name}`, `${c}💰`, `Esperando...`], COLORES.advertencia, "small", 2, p.id);
         setTimeout(() => {
             const idx = STATE.duelosActivos.findIndex(d => d.retador === p.id && d.retado === target.id);
-            if (idx !== -1) { const d = STATE.duelosActivos[idx]; STATE.duelosActivos.splice(idx, 1); const st = STATE.baseDatos[d.retadorKey]; if (st) { st.monedas += d.cantidad; markDirty(d.retadorKey); } msgSmall(`⌛ Duelo expirado`, p.id, 0xFF3366, "small", 1); msgSmall(`⌛ Duelo expirado`, target.id, 0xFF3366, "small", 0); }
+            if (idx !== -1) { const d = STATE.duelosActivos[idx]; STATE.duelosActivos.splice(idx, 1); const st = STATE.baseDatos[d.retadorKey]; if (st) { st.monedas += d.cantidad; markDirty(d.retadorKey); } msgSmall(`⌛ Duelo expirado`, p.id, COLORES.error, "small", 1); msgSmall(`⌛ Duelo expirado`, target.id, COLORES.error, "small", 0); }
         }, 30000);
     },
     "!aceptar": (p) => {
@@ -1962,8 +1991,8 @@ const commands = {
         sB.duelos_ganados = (sB.duelos_ganados || 0) + (gr ? 0 : 1);
         sB.duelos_perdidos = (sB.duelos_perdidos || 0) + (gr ? 1 : 0);
         const gan = gr ? rt : p, per = gr ? p : rt;
-        msgBox(`⚔️ Duelo ganado`, [`Venciste a ${per.name}`, `+${d.cantidad}💰`], 0xFFD700, "small", 2, gan.id);
-        msgBox(`⚔️ Duelo perdido`, [`${gan.name} te venció`, `-${d.cantidad}💰`], 0xFF3366, "small", 2, per.id);
+        msgBox(`⚔️ Duelo ganado`, [`Venciste a ${per.name}`, `+${d.cantidad}💰`], COLORES.oro, "small", 2, gan.id);
+        msgBox(`⚔️ Duelo perdido`, [`${gan.name} te venció`, `-${d.cantidad}💰`], COLORES.error, "small", 2, per.id);
         [[rt, sA], [p, sB]].forEach(([pl, st]) => { if (st.duelos_ganados >= 10 && !st.badges.includes("duelista")) darBadge(pl, "duelista"); });
         markDirty(getPlayerKey(rt)); markDirty(getPlayerKey(p));
     },
@@ -1973,8 +2002,8 @@ const commands = {
         const d = STATE.duelosActivos[idx]; STATE.duelosActivos.splice(idx, 1);
         const rt = STATE.room.getPlayer(d.retador);
         const st = STATE.baseDatos[d.retadorKey]; if (st) { st.monedas += d.cantidad; markDirty(d.retadorKey); }
-        msgSmall(`🚫 Rechazaste el duelo${rt ? ` de ${rt.name}` : ""}`, p.id, 0xFF3366, "small", 1);
-        if (rt) msgSmall(`🚫 ${p.name} rechazó tu duelo`, rt.id, 0xFF3366, "small", 0);
+        msgSmall(`🚫 Rechazaste el duelo${rt ? ` de ${rt.name}` : ""}`, p.id, COLORES.error, "small", 1);
+        if (rt) msgSmall(`🚫 ${p.name} rechazó tu duelo`, rt.id, COLORES.error, "small", 0);
     },
     "!admin": (p, args, isA) => {
         if (!esAdminEfectivo(p, isA)) return msgError("Solo admins", p.id);
@@ -1986,7 +2015,7 @@ const commands = {
         const k = getPlayerKey(target);
         const s = STATE.baseDatos[k];
         if (s && JERARQUIA_RANGOS.indexOf(s.rango || "normal") < JERARQUIA_RANGOS.indexOf("admin")) { s.rango = "admin"; markDirty(k); }
-        msgBox(`👑 ¡NUEVO ADMIN!`, [`${target.name}`], 0xFFD700, "small-bold", 2, p.id);
+        msgBox(`👑 ¡NUEVO ADMIN!`, [`${target.name}`], COLORES.oro, "small-bold", 2, p.id);
         auditLog(p, "GIVE_ADMIN", target.name);
     },
     "!expulsar": (p, args, isA) => {
@@ -2039,7 +2068,7 @@ const commands = {
             STATE.afkDesde[p.id] = ahora;
             STATE.afkCooldown.set(key, ahora + CONFIG.AFK_REINGRESO_COOLDOWN_MS);
             STATE.room.setPlayerTeam(p.id, 0);
-            msgSmall(`💤 ${p.name} está AFK`, p.id, 0xFFAA00, "small-bold", 2);
+            msgSmall(`💤 ${p.name} está AFK`, p.id, COLORES.advertencia, "small-bold", 2);
             msgSmall(`Volvé en ${Math.round(CONFIG.AFK_KICK_MS / 1000)}s o te saca el sistema`, p.id, 0xFF8800, "small", 1);
         }
     },
@@ -2094,9 +2123,9 @@ const commands = {
         STATE.rainbowEquipoActivo = null;
         msgSuccess("Rainbow desactivado, camiseta restaurada", p.id);
     },
-    "!fairplay": (p, args, isA) => { if (esAdminEfectivo(p, isA)) { STATE.fairPlayActivo = !STATE.fairPlayActivo; msgSmall(`FairPlay: ${STATE.fairPlayActivo}`, p.id, 0x00FF88, "small-bold", 1); } },
-    "!ganasigue": (p, args, isA) => { if (esAdminEfectivo(p, isA)) { STATE.ganaSigueActivo = !STATE.ganaSigueActivo; msgSmall(`GanaSigue: ${STATE.ganaSigueActivo}`, p.id, 0x00FF88, "small-bold", 1); } },
-    "!goldeoro": (p, args, isA) => { if (esAdminEfectivo(p, isA)) { STATE.golDeOroActivo = !STATE.golDeOroActivo; msgSmall(`GolDeOro: ${STATE.golDeOroActivo}`, p.id, 0x00FF88, "small-bold", 1); } },
+    "!fairplay": (p, args, isA) => { if (esAdminEfectivo(p, isA)) { STATE.fairPlayActivo = !STATE.fairPlayActivo; msgSmall(`FairPlay: ${STATE.fairPlayActivo}`, p.id, COLORES.exito, "small-bold", 1); } },
+    "!ganasigue": (p, args, isA) => { if (esAdminEfectivo(p, isA)) { STATE.ganaSigueActivo = !STATE.ganaSigueActivo; msgSmall(`GanaSigue: ${STATE.ganaSigueActivo}`, p.id, COLORES.exito, "small-bold", 1); } },
+    "!goldeoro": (p, args, isA) => { if (esAdminEfectivo(p, isA)) { STATE.golDeOroActivo = !STATE.golDeOroActivo; msgSmall(`GolDeOro: ${STATE.golDeOroActivo}`, p.id, COLORES.exito, "small-bold", 1); } },
     "!tamano": (p, args) => {
         const s = STATE.baseDatos[getPlayerKey(p)];
         if (!esOwner(p) && !s?.vip) return msgError("Tamaño solo para VIP", p.id);
@@ -2134,7 +2163,7 @@ const commands = {
     "!misiones": (p) => {
         const s = STATE.baseDatos[getPlayerKey(p)];
         actualizarMisionDiaria(s); actualizarMisionSemanal(s);
-        sendAnnouncement(`🎯 Hoy: ${s.misiones.goles}/${CONFIG.MISION_GOLES_OBJETIVO} goles ${s.misiones.completadas.includes("goles_dia") ? "✅" : ""}\n🗓️ Semana: ${s.misionSemanal.partidos}/${CONFIG.MISION_SEMANAL_PARTIDOS_OBJETIVO} partidos ${s.misionSemanal.completada ? "✅" : ""}`, p.id, 0x00BFFF, "small", 0);
+        sendAnnouncement(`🎯 Hoy: ${s.misiones.goles}/${CONFIG.MISION_GOLES_OBJETIVO} goles ${s.misiones.completadas.includes("goles_dia") ? "✅" : ""}\n🗓️ Semana: ${s.misionSemanal.partidos}/${CONFIG.MISION_SEMANAL_PARTIDOS_OBJETIVO} partidos ${s.misionSemanal.completada ? "✅" : ""}`, p.id, COLORES.info, "small", 0);
     },
     "!clan": (p, args) => {
         const k = getPlayerKey(p), s = STATE.baseDatos[k];
@@ -2162,7 +2191,7 @@ const commands = {
             const tk = getPlayerKey(t);
             if (STATE.baseDatos[tk]?.clan) return msgError("Ese jugador ya tiene clan", p.id);
             STATE.clanInvitaciones[tk] = { clan: s.clan, invitadoPor: p.name, expira: Date.now() + CONFIG.CLAN_INVITACION_TTL_MS };
-            msgSmall(`⚔️ ${t.name} invitado a ${c.nombre}`, null, 0xFFAA00, "small", 1);
+            msgSmall(`⚔️ ${t.name} invitado a ${c.nombre}`, null, COLORES.advertencia, "small", 1);
             msgInfo(`⚔️ ${p.name} te invitó al clan "${c.nombre}". Usá !clan aceptar`, t.id);
         } else if (sub === "aceptar") {
             const inv = STATE.clanInvitaciones[k];
@@ -2172,14 +2201,14 @@ const commands = {
             if (!c) { delete STATE.clanInvitaciones[k]; return msgError("Ese clan ya no existe", p.id); }
             if (s.clan) return msgError("Ya estás en un clan", p.id);
             c.miembros.push(k); s.clan = inv.clan; delete STATE.clanInvitaciones[k];
-            msgBox("⚔️ Nuevo en el clan", [`${p.name} se unió a ${c.nombre}`], 0x00FF88, "small-bold", 1);
+            msgBox("⚔️ Nuevo en el clan", [`${p.name} se unió a ${c.nombre}`], COLORES.exito, "small-bold", 1);
             markDirty(k);
         } else if (sub === "salir") {
             if (!s.clan || !STATE.clanes[s.clan]) return msgError("No tenés clan", p.id);
             const c = STATE.clanes[s.clan];
             c.miembros = c.miembros.filter(m => m !== k);
             if (c.lider === k) { if (c.miembros.length > 0) c.lider = c.miembros[0]; else delete STATE.clanes[s.clan]; }
-            msgSmall(`${p.name} abandonó el clan`, p.id, 0xFFAA00, "small", 1);
+            msgSmall(`${p.name} abandonó el clan`, p.id, COLORES.advertencia, "small", 1);
             s.clan = null; markDirty(k);
         } else if (sub === "info") {
             const id = args.slice(1).join(" ").toLowerCase() || s.clan;
@@ -2205,7 +2234,7 @@ const commands = {
         if (!esAdminEfectivo(p, isA)) return;
         const u = STATE.reportes.slice(-10).reverse();
         if (!u.length) return msgInfo("Sin reportes", p.id);
-        sendAnnouncement(`📋 ÚLTIMOS REPORTES:\n${u.map(r => `${r.reportadoNombre} ← ${r.reportante}: ${r.motivo}`).join("\n")}`, p.id, 0xFFAA00, "small-bold", 0);
+        sendAnnouncement(`📋 ÚLTIMOS REPORTES:\n${u.map(r => `${r.reportadoNombre} ← ${r.reportante}: ${r.motivo}`).join("\n")}`, p.id, COLORES.advertencia, "small-bold", 0);
     },
     "!llamar": (p, args) => {
         const ahora = Date.now();
@@ -2214,7 +2243,7 @@ const commands = {
         const m = args.join(" ") || "sin especificar";
         msgWarn(`${p.name} está llamando a un admin`, null);
         STATE.room.getPlayerList().filter(pl => pl.admin).forEach(pl => msgInfo(`📣 ${p.name} llamó: ${m}`, pl.id));
-        msgSmall(`🔰 Se avisó a los admins. Motivo: "${m}"`, p.id, 0xFFAA00, "small-bold", 1);
+        msgSmall(`🔰 Se avisó a los admins. Motivo: "${m}"`, p.id, COLORES.advertencia, "small-bold", 1);
     },
     "!callar": (p, args, isA) => {
         if (!isA && !puedeUsar(p, "!callar")) return;
@@ -2228,7 +2257,7 @@ const commands = {
         const dur = tD ? pd : CONFIG.MUTE_DEFAULT_MIN * 60000;
         STATE.mutesTemporales = STATE.mutesTemporales.filter(m => m.auth !== tk);
         STATE.mutesTemporales.push({ auth: tk, timestamp: Date.now(), duracion: dur });
-        msgBox("🤫 Silenciado", [`${target ? target.name : STATE.baseDatos[tk]?.nombre_actual}`, `${formatDuracion(dur)}`], 0xFFAA00, "small-bold", 2, p.id);
+        msgBox("🤫 Silenciado", [`${target ? target.name : STATE.baseDatos[tk]?.nombre_actual}`, `${formatDuracion(dur)}`], COLORES.advertencia, "small-bold", 2, p.id);
         auditLog(p, "MUTE", target?.name || STATE.baseDatos[tk]?.nombre_actual, formatDuracion(dur));
     },
     "!hablar": (p, args, isA) => {
@@ -2251,7 +2280,7 @@ const commands = {
         aplicarBanGlobal(key, CONFIG.BAN_DIAS_NORMAL * 86400000);
         const n = target ? target.name : STATE.baseDatos[key].nombre_actual;
         if (target) STATE.room.kickPlayer(target.id, `⛔ Baneado ${CONFIG.BAN_DIAS_NORMAL}d. Motivo: ${motivo}`, false);
-        msgBox("⛔ Baneado", [`${n}`, `${CONFIG.BAN_DIAS_NORMAL}d`, `${motivo}`], 0xFF3366, "small-bold", 2, p.id);
+        msgBox("⛔ Baneado", [`${n}`, `${CONFIG.BAN_DIAS_NORMAL}d`, `${motivo}`], COLORES.error, "small-bold", 2, p.id);
         logMsg('security.log', `[${ROOM_ID}] ${p.name} baneó a ${n} (${CONFIG.BAN_DIAS_NORMAL}d): ${motivo}`);
         auditLog(p, "BAN", n, `${CONFIG.BAN_DIAS_NORMAL}d · ${motivo}`);
     },
@@ -2266,7 +2295,7 @@ const commands = {
         aplicarBanGlobal(key, CONFIG.BAN_DIAS_LOW * 86400000);
         const n = target ? target.name : STATE.baseDatos[key].nombre_actual;
         if (target) STATE.room.kickPlayer(target.id, `⛔ Baneado ${CONFIG.BAN_DIAS_LOW}d: ${motivo}`, false);
-        msgBox("⛔ Baneado", [`${n}`, `${CONFIG.BAN_DIAS_LOW}d`, `${motivo}`], 0xFF3366, "small-bold", 2, p.id);
+        msgBox("⛔ Baneado", [`${n}`, `${CONFIG.BAN_DIAS_LOW}d`, `${motivo}`], COLORES.error, "small-bold", 2, p.id);
         auditLog(p, "BAN_MIN", n, `${CONFIG.BAN_DIAS_LOW}d · ${motivo}`);
     },
     "!desvetar": (p, args) => {
@@ -2289,7 +2318,7 @@ const commands = {
         const hoy = getDiaString(Date.now());
         if (s.warns_fecha !== hoy) { s.warns_fecha = hoy; s.warns_hoy = 0; }
         s.warns_hoy++; markDirty(key);
-        msgBox(`⚠️ WARN`, [`${target ? target.name : s.nombre_actual} (${s.warns_hoy}/${CONFIG.WARN_MAX})`, `${m}`], 0xFFAA00, "small-bold", 2, p.id);
+        msgBox(`⚠️ WARN`, [`${target ? target.name : s.nombre_actual} (${s.warns_hoy}/${CONFIG.WARN_MAX})`, `${m}`], COLORES.advertencia, "small-bold", 2, p.id);
         auditLog(p, "WARN", target?.name || s.nombre_actual, m);
         if (s.warns_hoy >= CONFIG.WARN_MAX) {
             aplicarBanGlobal(key, CONFIG.BAN_DIAS_LOW * 86400000);
@@ -2298,7 +2327,7 @@ const commands = {
         }
     },
     "!desadv": (p, args) => { if (!puedeUsar(p, "!desadv")) return msgError("Sin permiso", p.id); const k = findPlayerKeyByName(args.join(" ")); if (!k || !STATE.baseDatos[k]) return msgError("No encontrado", p.id); STATE.baseDatos[k].warns_hoy = 0; markDirty(k); msgSuccess(`Warn removido`, p.id); },
-    "!listaneg": (p, args) => { if (!puedeUsar(p, "!listaneg")) return msgError("Sin permiso", p.id); const { target, key } = resolverJugadorYResto(args); if (!key || !STATE.baseDatos[key]) return msgError("No encontrado", p.id); if (!actorSuperaKey(p, key)) return msgError("No podés listar a alguien de rango igual o mayor", p.id); setBlacklistGlobal(key, true); if (target) STATE.room.kickPlayer(target.id, "🚫 Lista negra", false); msgBox("🚫 Lista negra", [`${STATE.baseDatos[key].nombre_actual} agregado`], 0xFF3366, "small-bold", 2, p.id); auditLog(p, "BLACKLIST", STATE.baseDatos[key].nombre_actual); },
+    "!listaneg": (p, args) => { if (!puedeUsar(p, "!listaneg")) return msgError("Sin permiso", p.id); const { target, key } = resolverJugadorYResto(args); if (!key || !STATE.baseDatos[key]) return msgError("No encontrado", p.id); if (!actorSuperaKey(p, key)) return msgError("No podés listar a alguien de rango igual o mayor", p.id); setBlacklistGlobal(key, true); if (target) STATE.room.kickPlayer(target.id, "🚫 Lista negra", false); msgBox("🚫 Lista negra", [`${STATE.baseDatos[key].nombre_actual} agregado`], COLORES.error, "small-bold", 2, p.id); auditLog(p, "BLACKLIST", STATE.baseDatos[key].nombre_actual); },
     "!quitveto": (p, args) => { if (!puedeUsar(p, "!quitveto")) return msgError("Sin permiso", p.id); const k = findPlayerKeyByName(args.join(" ")); if (!k || !STATE.baseDatos[k]) return msgError("No encontrado", p.id); setBlacklistGlobal(k, false); msgSuccess(`${STATE.baseDatos[k].nombre_actual} salió de lista negra`, p.id); auditLog(p, "UNBLACKLIST", STATE.baseDatos[k].nombre_actual); },
     "!dar": (p, args) => {
         if (args.length < 2) return msgError("Uso: !dar [vip/supervip/ultravip/mod/modplus/admin/coowner] [jugador] (perma/[días])", p.id);
@@ -2328,12 +2357,12 @@ const commands = {
         } else if (tipo === "mod" || tipo === "modplus") {
             if (!["admin", "coowner", "owner"].includes(ra)) return msgError("Solo admins+", p.id);
             s.rango = tipo === "modplus" ? "modplus" : "mod"; markDirty(key);
-            msgBox("🛡️ Nuevo staff", [`${target.name} ahora es ${tipo === "modplus" ? "MOD+" : "MOD"}`], 0x00BFFF, "small-bold", 2, p.id);
+            msgBox("🛡️ Nuevo staff", [`${target.name} ahora es ${tipo === "modplus" ? "MOD+" : "MOD"}`], COLORES.info, "small-bold", 2, p.id);
             auditLog(p, "GRANT_RANK", target.name, tipo);
         } else if (tipo === "admin") {
             if (!["coowner", "owner"].includes(ra)) return msgError("Solo owner/co-owner", p.id);
             s.rango = "admin"; markDirty(key);
-            msgBox("🛠 Nuevo admin", [`${target.name}`], 0xFFD700, "small-bold", 2, p.id);
+            msgBox("🛠 Nuevo admin", [`${target.name}`], COLORES.oro, "small-bold", 2, p.id);
             auditLog(p, "GRANT_RANK", target.name, "admin");
         } else if (tipo === "coowner") {
             if (ra !== "owner") return msgError("Solo owner", p.id);
@@ -2411,13 +2440,13 @@ const commands = {
         if (act === p.id) return;
         STATE.gkReservado[p.team] = p.id;
         aplicarTamanoPersistente(p);
-        msgMini(`🧤 ${p.name} se puso los guantes`, p.id, 0x00BFFF, 1);
+        msgMini(`🧤 ${p.name} se puso los guantes`, p.id, COLORES.info, 1);
     },
     "!salirarquero": (p) => dejarArquero(p),
     "!capitanes": (p) => {
         if (!STATE.partidoEnCurso) return msgError("No hay partido", p.id);
         const n = (t) => { const id = STATE.capitanes[t]; const j = id != null ? STATE.room.getPlayer(id) : null; return j ? j.name : "—"; };
-        msgBox(`${CONFIG.CAPITAN_AVATAR} Capitanes`, [`🔴 ${n(1)}`, `🔵 ${n(2)}`], 0xFFD700, "small-bold", 0, p.id);
+        msgBox(`${CONFIG.CAPITAN_AVATAR} Capitanes`, [`🔴 ${n(1)}`, `🔵 ${n(2)}`], COLORES.oro, "small-bold", 0, p.id);
     },
     "!capitan": (p, args, isA) => {
         if (!esAdminEfectivo(p, isA)) return msgError("Solo admins", p.id);
@@ -2431,10 +2460,10 @@ const commands = {
         if (STATE.capitanes[team] != null) marcarCapitan(STATE.capitanes[team], false);
         STATE.capitanes[team] = t.id;
         marcarCapitan(t.id, true);
-        msgSmall(`${CONFIG.CAPITAN_AVATAR} ${t.name} capitán del ${team === 1 ? "rojo 🔴" : "azul 🔵"} (por ${p.name})`, null, team === 1 ? 0xFF3366 : 0x00BFFF, "small-bold", 1);
+        msgSmall(`${CONFIG.CAPITAN_AVATAR} ${t.name} capitán del ${team === 1 ? "rojo 🔴" : "azul 🔵"} (por ${p.name})`, null, team === 1 ? COLORES.equipo_rojo : COLORES.equipo_azul, "small-bold", 1);
     },
-    "!bb": (p) => { sendAnnouncement(`👋 ${p.name} se despidió (!bb)`, null, 0xFFAA00, "small-bold", 1); STATE.salidasVoluntarias.add(p.id); STATE.room.kickPlayer(p.id, "👋 ¡Bye bye!", false); },
-    "!nv": (p) => { sendAnnouncement(`👋 ${p.name} se despidió (!nv)`, null, 0xFFAA00, "small-bold", 1); STATE.salidasVoluntarias.add(p.id); STATE.room.kickPlayer(p.id, "👋 ¡Nos vemos!", false); },
+    "!bb": (p) => { sendAnnouncement(`👋 ${p.name} se despidió (!bb)`, null, COLORES.advertencia, "small-bold", 1); STATE.salidasVoluntarias.add(p.id); STATE.room.kickPlayer(p.id, "👋 ¡Bye bye!", false); },
+    "!nv": (p) => { sendAnnouncement(`👋 ${p.name} se despidió (!nv)`, null, COLORES.advertencia, "small-bold", 1); STATE.salidasVoluntarias.add(p.id); STATE.room.kickPlayer(p.id, "👋 ¡Nos vemos!", false); },
     "!mapa": (p, args, isA) => {
         if (!esAdminEfectivo(p, isA)) return;
         const n = (args[0] || "").toLowerCase();
@@ -2451,7 +2480,7 @@ const commands = {
         safeOperation(() => { STATE.room.setTeamColors(1, cam2.angle ?? 90, textoContrasteCamiseta(cam2.colors[0]), cam2.colors); STATE.room.setTeamColors(2, cam1.angle ?? 90, textoContrasteCamiseta(cam1.colors[0]), cam1.colors); });
         STATE.ultimasCamisetas = { cam1: cam2, cam2: cam1 };
         if (STATE.rainbowEquipoActivo) { restaurarCamisetaEquipo(STATE.rainbowEquipoActivo.team, STATE.rainbowEquipoActivo.colorOriginal); STATE.rainbowEquipoActivo = null; }
-        msgSmall("🔄 Camisetas intercambiadas", p.id, 0xFFD700, "small-bold", 1);
+        msgSmall("🔄 Camisetas intercambiadas", p.id, COLORES.oro, "small-bold", 1);
     },
     "!liga": (p, args, isA) => {
         if (!esAdminEfectivo(p, isA)) return;
@@ -2465,7 +2494,7 @@ const commands = {
         safeOperation(() => STATE.room.setTeamColors(tid, club.angle ?? 90, textoContrasteCamiseta(club.colors[0]), club.colors));
         if (!STATE.ultimasCamisetas) STATE.ultimasCamisetas = { cam1: club, cam2: club };
         if (tid === 1) STATE.ultimasCamisetas.cam1 = club; else STATE.ultimasCamisetas.cam2 = club;
-        msgSmall(`🎽 ${eq} ahora con la de ${club.name}`, p.id, 0xFFD700, "small-bold", 1);
+        msgSmall(`🎽 ${eq} ahora con la de ${club.name}`, p.id, COLORES.oro, "small-bold", 1);
     },
     "!vip": (p, args) => {
         if (!esOwner(p)) return msgError("Solo owner", p.id);
@@ -2544,7 +2573,7 @@ const commands = {
     "!listadmins": (p) => {
         if (!esOwner(p)) return msgError("Solo owner", p.id);
         if (!STATE.adminsAutomaticos.size) return msgSuccess("Sin admins automáticos", p.id);
-        msgCaja("👑 Admins automáticos", [...STATE.adminsAutomaticos].map(auth => { const s = STATE.baseDatos[auth]; const on = STATE.room.getPlayerList().some(pl => STATE.authPorId.get(pl.id) === auth); return `${s?.nombre_actual || auth} ${on ? "🟢" : "⚪"}`; }), 0xFFD700, "small", 0, p.id);
+        msgCaja("👑 Admins automáticos", [...STATE.adminsAutomaticos].map(auth => { const s = STATE.baseDatos[auth]; const on = STATE.room.getPlayerList().some(pl => STATE.authPorId.get(pl.id) === auth); return `${s?.nombre_actual || auth} ${on ? "🟢" : "⚪"}`; }), COLORES.oro, "small", 0, p.id);
     },
     "!contrasena": (p, args, isA) => { if (!esAdminEfectivo(p, isA)) return; if (!args[0] || args[0].toLowerCase() === "off") { safeOperation(() => STATE.room.setPassword(null)); return msgSuccess("Contraseña desactivada", p.id); } safeOperation(() => STATE.room.setPassword(args.join(" "))); msgSuccess(`Contraseña activada`, p.id); },
     "!temporada": (p, args, isA) => {
@@ -2555,16 +2584,16 @@ const commands = {
         ent.forEach(([k, s]) => { s.campeonatos = s.campeonatos || []; s.campeonatos.push(STATE.TEMPORADA_ACTUAL); darBadgePorKey(k, "campeon", s.nombre_actual); });
         Object.entries(STATE.baseDatos).forEach(([k, s]) => { s.mmr = Math.round(1000 + (s.mmr - 1000) * 0.5); s.temporada = STATE.TEMPORADA_ACTUAL + 1; actualizarTitulo(k, true); });
         STATE.TEMPORADA_ACTUAL++;
-        msgCaja(`🏆 ¡Arrancó Temporada ${STATE.TEMPORADA_ACTUAL}!`, [`👑 Campeones: ${ent.map(([, s]) => s.nombre_actual).join(", ")}`, `🔄 ELO comprimido`], 0xFFD700, "bold", 2, null);
+        msgCaja(`🏆 ¡Arrancó Temporada ${STATE.TEMPORADA_ACTUAL}!`, [`👑 Campeones: ${ent.map(([, s]) => s.nombre_actual).join(", ")}`, `🔄 ELO comprimido`], COLORES.oro, "bold", 2, null);
         markDirty();
         auditLog(p, "NEW_SEASON", `T${STATE.TEMPORADA_ACTUAL}`, ent.map(([, s]) => s.nombre_actual).join(","));
     },
-    "!records": (p) => { if (!STATE.campeones.length) return msgInfo("Sin campeones aún", p.id); const u = STATE.campeones.slice(-5).reverse(); msgBox("📜 Salón de la fama", u.map(c => `S${c.temporada}: ${c.top.map(t => `${t.nombre}(${t.mmr})`).join(", ")}`), 0xFFD700, "small", 2, p.id); },
-    "!tutorial": (p) => { sendAnnouncement(`📘 CÓMO ARRANCAR:\n1️⃣ !jugar entra a la cancha\n2️⃣ Cada partido suma ELO/monedas/XP\n3️⃣ !perfil para ver stats\n4️⃣ !tienda para gastar\n5️⃣ !clan para fundar\n6️⃣ !misiones objetivo diario\n📜 !comandos lista completa`, p.id, 0x00BFFF, "small-bold", 0); },
+    "!records": (p) => { if (!STATE.campeones.length) return msgInfo("Sin campeones aún", p.id); const u = STATE.campeones.slice(-5).reverse(); msgBox("📜 Salón de la fama", u.map(c => `S${c.temporada}: ${c.top.map(t => `${t.nombre}(${t.mmr})`).join(", ")}`), COLORES.oro, "small", 2, p.id); },
+    "!tutorial": (p) => { sendAnnouncement(`📘 CÓMO ARRANCAR:\n1️⃣ !jugar entra a la cancha\n2️⃣ Cada partido suma ELO/monedas/XP\n3️⃣ !perfil para ver stats\n4️⃣ !tienda para gastar\n5️⃣ !clan para fundar\n6️⃣ !misiones objetivo diario\n📜 !comandos lista completa`, p.id, COLORES.info, "small-bold", 0); },
     "!comandos": (p, args, isA) => {
         let a = `📜 Comandos\n!jugar !ver !perfil !vs [jug] !tabla !tienda !misiones !figuras\n!goles !asist !figuras !partidos !vallas !horas !monedas !efec\n!enviar !casino !apostar !ruleta !moneda !veintiuno !pedir !plantar !dinero\n!afk !liga [club] !capitanes !votar (💎 !tamano solo VIP)\n!duelo [jug] [monto] !aceptar !rechazar\n!clan crear/invitar/aceptar/salir/info/tabla\n!reportar [jug] [motivo] !records !ids !llamar [motivo]\n🎮 t [msg] equipo · ⚔️ c [msg] clan · @@nombre [msg] privado`;
         if (esAdminEfectivo(p, isA)) a += `\n\n⚡ Admins\n!iniciar !detener !echar !fueraafk !powershot !curva !rainbow !mapa\n!juegantodos !auto !x2jt !x3jt !x5jt !x6jt !x7jt !x4jt !callar !hablar !fairplay\n!ganasigue !goldeoro !swapcol !capitan [jug] !expulsar !contrasena !temporada\n!reportes !status !admin [ID] !verificar [código] !panel [número]`;
-        sendAnnouncement(a, p.id, 0xFFFFFF, "small-bold", 0);
+        sendAnnouncement(a, p.id, COLORES.blanco, "small-bold", 0);
     },
     "!status": (p) => {
         if (!esOwner(p) && !esAdminEfectivo(p, false)) return msgError("Solo admins/owner", p.id);
@@ -2581,7 +2610,7 @@ const commands = {
             `Pool global: ${pg.total || 0} (${pg.idle || 0} idle, ${pg.waiting || 0} espera)`,
             `Discord CB: ${DISCORD_CB.abiertoHasta > Date.now() ? "🔴 abierto" : "🟢 cerrado"}`,
             `Retry queue: ${RETRY_QUEUE.length}`,
-        ], 0x00BFFF, "small", 0, p.id);
+        ], COLORES.info, "small", 0, p.id);
     },
 };
 
@@ -2598,10 +2627,10 @@ for (const [n, c] of Object.entries(BRACKETS_FIJOS_JT)) {
         const ya = STATE.automatizadoActivado && STATE.bracketFijo === bf;
         if (!ya) {
             STATE.automatizadoActivado = true; STATE.bracketFijo = bf; STATE.jueganTodosActivo = true; STATE.fairPlayActivo = false;
-            msgSmall(`✅ ${c.l}: ON`, p.id, 0x00FF88, "small-bold", 1);
+            msgSmall(`✅ ${c.l}: ON`, p.id, COLORES.exito, "small-bold", 1);
             ejecutarAutomatizado(true);
-            if (CONFIG.AUTOMATED_MODE_ANNOUNCE && STATE.room) sendAnnouncement(`⚙️ Modo ${c.l}`, null, 0x00BFFF, "small", 0);
-        } else { STATE.automatizadoActivado = false; STATE.bracketFijo = null; msgSmall(`❌ ${c.l}: OFF`, p.id, 0xFF3366, "small-bold", 1); }
+            if (CONFIG.AUTOMATED_MODE_ANNOUNCE && STATE.room) sendAnnouncement(`⚙️ Modo ${c.l}`, null, COLORES.info, "small", 0);
+        } else { STATE.automatizadoActivado = false; STATE.bracketFijo = null; msgSmall(`❌ ${c.l}: OFF`, p.id, COLORES.error, "small-bold", 1); }
     };
 }
 commands["!x4jt"] = (p, args, isA) => {
@@ -2609,10 +2638,10 @@ commands["!x4jt"] = (p, args, isA) => {
     const ya = STATE.automatizadoActivado && STATE.bracketFijo === BRACKET_X4_FIJO;
     if (!ya) {
         STATE.automatizadoActivado = true; STATE.bracketFijo = BRACKET_X4_FIJO; STATE.jueganTodosActivo = true; STATE.fairPlayActivo = false;
-        msgSmall("✅ X4: ON", p.id, 0x00FF88, "small-bold", 1);
+        msgSmall("✅ X4: ON", p.id, COLORES.exito, "small-bold", 1);
         ejecutarAutomatizado(true);
-        if (CONFIG.AUTOMATED_MODE_ANNOUNCE && STATE.room) sendAnnouncement("⚙️ Modo X4", null, 0x00BFFF, "small", 0);
-    } else { STATE.automatizadoActivado = false; STATE.bracketFijo = null; msgSmall("❌ X4: OFF", p.id, 0xFF3366, "small-bold", 1); }
+        if (CONFIG.AUTOMATED_MODE_ANNOUNCE && STATE.room) sendAnnouncement("⚙️ Modo X4", null, COLORES.info, "small", 0);
+    } else { STATE.automatizadoActivado = false; STATE.bracketFijo = null; msgSmall("❌ X4: OFF", p.id, COLORES.error, "small-bold", 1); }
 };
 
 const ACCIONES_ADMIN_MENU = [
@@ -2621,7 +2650,7 @@ const ACCIONES_ADMIN_MENU = [
     { numero: 3, etiqueta: "Mapa x5", accion: (p, isA) => commands["!mapa"](p, ["futx5"], isA) },
     { numero: 4, etiqueta: "Powershot", accion: (p, isA) => commands["!powershot"](p, [], isA) },
     { numero: 5, etiqueta: "Kick AFK", accion: (p, isA) => commands["!fueraafk"](p, [], isA) },
-    { numero: 6, etiqueta: "Balancear", accion: (p, isA) => { const j = STATE.room.getPlayerList().filter(x => x.team !== 0); if (j.length < 2) return msgError("Pocos en cancha", p.id); const { equipo1, equipo2 } = balancearEquiposElo(j); equipo1.forEach(x => STATE.room.setPlayerTeam(x.id, 1)); equipo2.forEach(x => STATE.room.setPlayerTeam(x.id, 2)); msgBox(`⚖️ Balanceados`, [`Por: ${p.name}`], 0x00FF88, "small-bold", 2, p.id); } },
+    { numero: 6, etiqueta: "Balancear", accion: (p, isA) => { const j = STATE.room.getPlayerList().filter(x => x.team !== 0); if (j.length < 2) return msgError("Pocos en cancha", p.id); const { equipo1, equipo2 } = balancearEquiposElo(j); equipo1.forEach(x => STATE.room.setPlayerTeam(x.id, 1)); equipo2.forEach(x => STATE.room.setPlayerTeam(x.id, 2)); msgBox(`⚖️ Balanceados`, [`Por: ${p.name}`], COLORES.exito, "small-bold", 2, p.id); } },
     { numero: 7, etiqueta: "Auto", accion: (p, isA) => commands["!auto"](p, [], isA) },
 ];
 commands["!menuadm"] = (p, args, isA) => {
@@ -2631,7 +2660,7 @@ commands["!menuadm"] = (p, args, isA) => {
         const a = ACCIONES_ADMIN_MENU[i], b = ACCIONES_ADMIN_MENU[i + 1];
         filas.push(b ? `[${a.numero}] ${a.etiqueta}   [${b.numero}] ${b.etiqueta}` : `[${a.numero}] ${a.etiqueta}`);
     }
-    sendAnnouncement(`👑 PANEL — !panel [número]\n${filas.join("\n")}`, p.id, 0xFFD700, "small-bold", 0);
+    sendAnnouncement(`👑 PANEL — !panel [número]\n${filas.join("\n")}`, p.id, COLORES.oro, "small-bold", 0);
 };
 commands["!panel"] = (p, args, isA) => {
     if (!esAdminEfectivo(p, isA)) return msgError("Solo admins", p.id);
@@ -2679,7 +2708,7 @@ function darXP(player, cantidad) {
         let bonus = 0;
         for (let n = s.nivel + 1; n <= nv; n++) bonus += n * 10;
         s.nivel = nv; s.monedas += bonus;
-        msgSmall(`🎉 Subiste a nivel ${nv} (+${bonus}💰)`, player.id, 0xFFD700, "small-bold", 1);
+        msgSmall(`🎉 Subiste a nivel ${nv} (+${bonus}💰)`, player.id, COLORES.oro, "small-bold", 1);
         if (nv >= 10 && !s.badges.includes("nivel_10")) darBadge(player, "nivel_10");
         if (nv >= 25 && !s.badges.includes("nivel_25")) darBadge(player, "nivel_25");
     }
@@ -2767,7 +2796,7 @@ function detectarYAnunciarRivalidad() {
     if (!me) return;
     STATE.rivalidadDelPartido = { keyRojo: me.keyRojo, keyAzul: me.keyAzul, nombreRojo: me.pRojo.name, nombreAzul: me.pAzul.name };
     const { victorias, derrotas, empates } = me.h;
-    sendAnnouncement(`⚔️ Rivalidad: ${me.pRojo.name} vs ${me.pAzul.name} — ${victorias}V ${derrotas}D${empates ? ` ${empates}E` : ""}`, null, 0xFFD700, "bold", 1);
+    sendAnnouncement(`⚔️ Rivalidad: ${me.pRojo.name} vs ${me.pAzul.name} — ${victorias}V ${derrotas}D${empates ? ` ${empates}E` : ""}`, null, COLORES.oro, "bold", 1);
 }
 function getFiguraDelPartido() {
     const ps = STATE.room.getPlayerList().filter(p => p.team !== 0);
@@ -2784,8 +2813,8 @@ function otorgarMVP(player) {
     if (s.mvps >= 5 && !s.badges.includes("mvp_5")) darBadge(player, "mvp_5");
     if (s.mvps >= 20 && !s.badges.includes("mvp_20")) darBadge(player, "mvp_20");
     markDirty(k);
-    sendAnnouncement(`🌟 MVP: ${player.name}`, null, 0xFFD700, "bold", 1);
-    msgSmall(`🎉 MVP · +${CONFIG.MVP_MONEDAS}💰 +${CONFIG.MVP_XP}XP`, player.id, 0xFFD700, "small-bold", 1);
+    sendAnnouncement(`🌟 MVP: ${player.name}`, null, COLORES.oro, "bold", 1);
+    msgSmall(`🎉 MVP · +${CONFIG.MVP_MONEDAS}💰 +${CONFIG.MVP_XP}XP`, player.id, COLORES.oro, "small-bold", 1);
 }
 function iniciarVotacionMVP(f) { if (f) otorgarMVP(f); }
 
@@ -2805,7 +2834,7 @@ function setupEvents() {
             {
                 const kr = getPlayerKey(player);
                 const ab = STATE.abandonos.get(kr);
-                if (ab && (Date.now() - ab.ts) < CONFIG.ELO_RECONEXION_GRACIA_MS) { STATE.abandonos.delete(kr); msgSmall(`👋 Volviste a tiempo`, player.id, 0x00BFFF, "small", 0); }
+                if (ab && (Date.now() - ab.ts) < CONFIG.ELO_RECONEXION_GRACIA_MS) { STATE.abandonos.delete(kr); msgSmall(`👋 Volviste a tiempo`, player.id, COLORES.info, "small", 0); }
             }
 
             if (!esOwner(player)) {
@@ -2845,7 +2874,7 @@ function setupEvents() {
             msgCaja(`⚽ ¡Bienvenido, ${player.name}!`, ls, t.color, "bold", 1, player.id);
             if (!s.intro_vista) {
                 s.intro_vista = true; markDirty(getPlayerKey(player));
-                msgCaja(`👋 Bienvenido a ${CONFIG.NOMBRE_SALA}`, [`Es tu primera vez:`, `🤖 La sala la maneja 『𝗕𝗮𝗵𝗜𝗔』 — tablas, niveles, logros automáticos.`, `📖 !ayuda o !comandos`, `💬 ${CONFIG.DISCORD_INVITE}`], 0x00BFFF, "small", 0, player.id);
+                msgCaja(`👋 Bienvenido a ${CONFIG.NOMBRE_SALA}`, [`Es tu primera vez:`, `🤖 La sala la maneja 『𝗕𝗮𝗵𝗜𝗔』 — tablas, niveles, logros automáticos.`, `📖 !ayuda o !comandos`, `💬 ${CONFIG.DISCORD_INVITE}`], COLORES.info, "small", 0, player.id);
             }
             if (s.msg_join) sendAnnouncement(`${player.name}: ${s.msg_join}`, player.id, s.color_nombre || 0x00FFFF, "small-bold", 1);
             const cj = STATE.room.getPlayerList().length - 1;
@@ -2883,7 +2912,7 @@ function setupEvents() {
             if (STATE.partidoEnCurso && player.team !== 0 && !vol) {
                 STATE.abandonos.set(key, { team: player.team, ts: Date.now(), stats: { ...(STATE.matchStats[player.id] || { goles: 0, asistencias: 0, atajadas: 0 }) } });
             }
-            if (!vol) { if (s?.msg_leave) sendAnnouncement(`${player.name}: ${s.msg_leave}`, null, s.color_nombre || 0x00FFFF, "small-bold", 1); else msgSmall(`👋 Se piró ${player.name}`, null, 0x00BFFF, "small", 0); }
+            if (!vol) { if (s?.msg_leave) sendAnnouncement(`${player.name}: ${s.msg_leave}`, null, s.color_nombre || 0x00FFFF, "small-bold", 1); else msgSmall(`👋 Se piró ${player.name}`, null, COLORES.info, "small", 0); }
             const cj = STATE.room.getPlayerList().length - 2;
             notificarJoinLeave(construirEmbed({ title: "🔴 Desconectado", description: `**${player.name}** salió`, color: 0xFF3366, footer: `${Math.max(cj, 0)}/30` }));
             if (STATE.liveStatsMessageId) editarMensajeLive(STATE.liveStatsMessageId, embedEstadoSala());
@@ -3014,7 +3043,7 @@ function setupEvents() {
         try {
             const sc = STATE.room.getScores();
             const ahora = Date.now();
-            if (STATE.golDeOroActivo && sc && sc.time > (sc.timeLimit * 60 - 60)) { msgBox(`🥇 ¡GOL DE ORO!`, [`¡${team === 1 ? "ROJO" : "AZUL"} GANA!`], 0xFFD700, "small-bold", 2); setTimeout(() => STATE.room.stopGame(), 3000); }
+            if (STATE.golDeOroActivo && sc && sc.time > (sc.timeLimit * 60 - 60)) { msgBox(`🥇 ¡GOL DE ORO!`, [`¡${team === 1 ? "ROJO" : "AZUL"} GANA!`], COLORES.oro, "small-bold", 2); setTimeout(() => STATE.room.stopGame(), 3000); }
             const tE = STATE.toquesRecientes.filter(t => t.team === team && ahora - t.tiempo < CONFIG.ASISTENCIA_VENTANA_MS);
             const gT = tE[tE.length - 1];
             const vK = gT?.velocidadKmh ?? calcularVelocidadTiro();
@@ -3075,10 +3104,10 @@ function setupEvents() {
                     STATE.eventoGolX2Activo = false;
                     const kG = gol ? getPlayerKey(gol) : null;
                     const sG = kG ? STATE.baseDatos[kG] : null;
-                    if (sG) { sG.monedas += 50; markDirty(kG); msgGame(`🎲 ¡Gol x2! ${gT.name} +50💰`, null, 0xFFD700, 1); }
+                    if (sG) { sG.monedas += 50; markDirty(kG); msgGame(`🎲 ¡Gol x2! ${gT.name} +50💰`, null, COLORES.oro, 1); }
                 }
             } else if (sc && !autoAn) {
-                anunciarGol("⚽ ¡GOOOL!", team, `Equipo ${team === 1 ? "ROJO" : "AZUL"}`, null, vK, sc);
+                anunciarGol(`${EMOJIS.soccer} ${EMOJIS.sparkles} GOOOL!`, team, `Equipo ${team === 1 ? "ROJO" : "AZUL"}`, null, vK, sc);
                 activarRainbowEquipo(team);
             }
             STATE.toquesRecientes = []; STATE.tiroPeligroso = null; resetPowershotState();
@@ -3171,7 +3200,7 @@ function setupEvents() {
             const jugadoresEnEquipos = ps.filter(p => p.team === 1 || p.team === 2).length;
             if (!nat && jugadoresEnEquipos === 0) {
                 safeOperation(() => STATE.room.stopRecording());
-                msgSmall(`\ud83d\uded1 Partido detenido, sin cambios de ELO`, null, 0xFF3366, "small-bold", 1);
+                msgSmall(`\ud83d\uded1 Partido detenido, sin cambios de ELO`, null, COLORES.error, "small-bold", 1);
                 STATE.room.getPlayerList().forEach(p => { const k = getPlayerKey(p); if (STATE.baseDatos[k]) STATE.baseDatos[k].jugando = false; });
                 Object.values(STATE.apuestas).forEach(a => { const s = STATE.baseDatos[a.key]; if (s) s.monedas += a.cantidad; });
                 if (Object.keys(STATE.apuestas).length) msgInfo("Apuestas reembolsadas", null);
@@ -3185,7 +3214,7 @@ function setupEvents() {
                 if (buf && buf.length) enviarEventoBot("replay", { archivoBase64: Buffer.from(buf).toString("base64"), nombreArchivo: `${CONFIG.NOMBRE_SALA || "replay"}_${Date.now()}.hbr2`, embed: construirEmbed({ title: "🎬 Replay", description: `Rojo ${sc.red} - ${sc.blue} Azul`, color: 0x9B59B6 }) }).catch(() => { });
             } catch (e) { logMsg('errors.log', `[${ROOM_ID}] Error replay: ${e.message}`); }
             STATE.records.partidosTotalesLiga = (STATE.records.partidosTotalesLiga || 0) + 1; markDirty();
-            Object.entries(STATE.apuestas).forEach(([pid, a]) => { const s = STATE.baseDatos[a.key]; if (!s) return; if (a.equipo === gan) { const pr = Math.round(a.cantidad * CONFIG.CUOTA_APUESTA); s.monedas += pr; msgSmall(`🎰 Apuesta ganada +${pr}💰`, parseInt(pid, 10), 0x00FF88, "small-bold", 1); } });
+            Object.entries(STATE.apuestas).forEach(([pid, a]) => { const s = STATE.baseDatos[a.key]; if (!s) return; if (a.equipo === gan) { const pr = Math.round(a.cantidad * CONFIG.CUOTA_APUESTA); s.monedas += pr; msgSmall(`🎰 Apuesta ganada +${pr}💰`, parseInt(pid, 10), COLORES.exito, "small-bold", 1); } });
             const r = ps.filter(p => p.team === 1), a = ps.filter(p => p.team === 2);
             const mr = r.length ? r.reduce((s, p) => s + (STATE.baseDatos[getPlayerKey(p)]?.mmr || 1000), 0) / r.length : 1000;
             const ma = a.length ? a.reduce((s, p) => s + (STATE.baseDatos[getPlayerKey(p)]?.mmr || 1000), 0) / a.length : 1000;
@@ -3205,7 +3234,7 @@ function setupEvents() {
                     s.monedas += mG;
                     const xG = pS.goles * 15;
                     darXP(p, xG);
-                    if (Math.random() < CONFIG.CAJA_PROBABILIDAD) { const mc = Math.floor(CONFIG.CAJA_MONEDAS_MIN + Math.random() * (CONFIG.CAJA_MONEDAS_MAX - CONFIG.CAJA_MONEDAS_MIN)); s.monedas += mc; msgSmall(`🎁✨ Caja +${mc}💰`, p.id, 0xFFD700, "small-bold", 1); }
+                    if (Math.random() < CONFIG.CAJA_PROBABILIDAD) { const mc = Math.floor(CONFIG.CAJA_MONEDAS_MIN + Math.random() * (CONFIG.CAJA_MONEDAS_MAX - CONFIG.CAJA_MONEDAS_MIN)); s.monedas += mc; msgSmall(`🎁✨ Caja +${mc}💰`, p.id, COLORES.oro, "small-bold", 1); }
                     const eR = p.team === 1 ? ma : mr;
                     let res = 0.5, resT = "🤝 Empate";
                     const rA = s.racha;
@@ -3236,7 +3265,7 @@ function setupEvents() {
                         const tp = getTituloSeguro(s.titulo || "bronce1");
                         const sg = getSiguienteRango(s.titulo || "bronce1");
                         if (sg) { const rw = Math.max(1, sg.req - tp.req); const av = Math.max(0, Math.min(1, (s.mmr - tp.req) / rw)); const B = 10, ll = Math.round(av * B); lE += `\n   ${"▰".repeat(ll) + "▱".repeat(B - ll)} faltan ${Math.max(0, sg.req - s.mmr)} para ${sg.nombre}`; }
-                    } else { s.escudo_mmr_activo = false; lE = `🛡️ Escudo Anti-ELO usado`; msgSmall(`🛡️ ${p.name} usó Escudo`, null, 0x00BFFF, "small", 0); }
+                    } else { s.escudo_mmr_activo = false; lE = `🛡️ Escudo Anti-ELO usado`; msgSmall(`🛡️ ${p.name} usó Escudo`, null, COLORES.info, "small", 0); }
                     if (gan !== 0) chequearAntiSmurf(p, s);
                     const col = resT === "🏆 Victoria" ? 0x00FF88 : resT === "❌ Derrota" ? 0xFF3366 : 0xFFD700;
                     const tj = STATE.inicioPartido ? formatTime((Date.now() - STATE.inicioPartido) / 1000) : "?";
@@ -3263,12 +3292,12 @@ function setupEvents() {
             if (STATE.rivalidadDelPartido) {
                 const { keyRojo, keyAzul, nombreRojo, nombreAzul } = STATE.rivalidadDelPartido;
                 const h = STATE.baseDatos[keyRojo]?.historial_vs?.[keyAzul];
-                if (h) sendAnnouncement(`⚔️ Rivalidad: ${nombreRojo} ${h.victorias}-${h.derrotas} ${nombreAzul}`, null, 0xFFD700, "small", 0);
+                if (h) sendAnnouncement(`⚔️ Rivalidad: ${nombreRojo} ${h.victorias}-${h.derrotas} ${nombreAzul}`, null, COLORES.oro, "small", 0);
                 STATE.rivalidadDelPartido = null;
             }
             if (vR) { const kk = getPlayerKey(STATE.ArqueroRED), s = STATE.baseDatos[kk]; if (s) { s.vallas_invictas = (s.vallas_invictas || 0) + 1; if (s.vallas_invictas >= 10 && !s.badges.includes("portero_muro")) darBadge(STATE.ArqueroRED, "portero_muro"); } }
             if (vB) { const kk = getPlayerKey(STATE.ArqueroBLUE), s = STATE.baseDatos[kk]; if (s) { s.vallas_invictas = (s.vallas_invictas || 0) + 1; if (s.vallas_invictas >= 10 && !s.badges.includes("portero_muro")) darBadge(STATE.ArqueroBLUE, "portero_muro"); } }
-            if (fig) { const fS = STATE.matchStats[fig.id] || { goles: 0, asistencias: 0 }; const rat = Math.min(10, (6 + fS.goles * 1.2 + fS.asistencias * 0.8)).toFixed(1); sendAnnouncement(`🌟 Figura: ${fig.name} · ⚽${fS.goles} 🎁${fS.asistencias} · ❬${rat}/10❭`, null, 0xFFD700, "small-bold", 2); }
+            if (fig) { const fS = STATE.matchStats[fig.id] || { goles: 0, asistencias: 0 }; const rat = Math.min(10, (6 + fS.goles * 1.2 + fS.asistencias * 0.8)).toFixed(1); sendAnnouncement(`🌟 Figura: ${fig.name} · ⚽${fS.goles} 🎁${fS.asistencias} · ❬${rat}/10❭`, null, COLORES.oro, "small-bold", 2); }
             const tp = STATE.equipoRojoPosesion + STATE.equipoAzulPosesion;
             if (tp > 0) { const pR = ((STATE.equipoRojoPosesion / tp) * 100).toFixed(1); sendAnnouncement(`📈 Posesión: 🔴 ${pR}% : ${(100 - pR).toFixed(1)}% 🔵`, null, 0xFFFFFF, "small", 0); }
             iniciarVotacionMVP(fig);
@@ -3301,9 +3330,9 @@ function setupEvents() {
             const key = getPlayerKey(player);
             if (STATE.mutesTemporales.find(m => m.auth === key)) { msgError("Estás muteado", player.id); return false; }
             if (!isAdmin && checkFlood(player)) { msgError(`Pará un poco. Muteado ${Math.round(CONFIG.FLOOD_MUTE_MS / 1000)}s`, player.id); return false; }
-            if (message.startsWith("t ") && player.team !== 0) { const tm = message.slice(2); STATE.room.getPlayerList().filter(p => p.team === player.team).forEach(p => sendAnnouncement(`🔒 [TEAM] ${player.name}: ${tm}`, p.id, player.team === 1 ? 0xFF3366 : 0x00BFFF, "small-bold", 1)); return false; }
+            if (message.startsWith("t ") && player.team !== 0) { const tm = message.slice(2); STATE.room.getPlayerList().filter(p => p.team === player.team).forEach(p => sendAnnouncement(`🔒 [TEAM] ${player.name}: ${tm}`, p.id, player.team === 1 ? COLORES.equipo_rojo : COLORES.equipo_azul, "small-bold", 1)); return false; }
             if (message.startsWith("c ")) { const sc = stats; if (sc?.clan && STATE.clanes[sc.clan]) { const cm = message.slice(2), nc = STATE.clanes[sc.clan].nombre; STATE.room.getPlayerList().filter(p => STATE.baseDatos[getPlayerKey(p)]?.clan === sc.clan).forEach(p => sendAnnouncement(`⚔️ [${nc}] ${player.name}: ${cm}`, p.id, 0xFF00FF, "small-bold", 1)); return false; } }
-            if (message.startsWith("@@")) { const m = message.match(/^@@(\S+)\s+(.+)$/); if (m) { const t = findOnlinePlayer(m[1]); if (t) { sendAnnouncement(`📨 [PM de ${player.name}]: ${m[2]}`, t.id, 0xFFAA00, "small-bold", 2); sendAnnouncement(`📨 → ${t.name}: ${m[2]}`, player.id, 0x00FF88, "small", 0); } return false; } }
+            if (message.startsWith("@@")) { const m = message.match(/^@@(\S+)\s+(.+)$/); if (m) { const t = findOnlinePlayer(m[1]); if (t) { sendAnnouncement(`📨 [PM de ${player.name}]: ${m[2]}`, t.id, COLORES.advertencia, "small-bold", 2); sendAnnouncement(`📨 → ${t.name}: ${m[2]}`, player.id, COLORES.exito, "small", 0); } return false; } }
             const msg = message.toLowerCase().trim();
             if (!msg.startsWith("!")) {
                 notificarMensaje(`**${player.name}**: ${message}`);
@@ -3457,7 +3486,7 @@ setInterval(guardarVerif, 30000);
     setInterval(limpiarCache, CONFIG.CACHE_TTL);
     setInterval(backupDatabase, CONFIG.BACKUP_INTERVAL_MS);
     setInterval(pollGlobalSync, CONFIG.BAN_POLL_INTERVAL_MS);
-    setInterval(() => { if (!STATE.partidoEnCurso) return; STATE.tipIndex = ((STATE.tipIndex ?? -1) + 1) % TIPS_SALA.length; msgSmall(TIPS_SALA[STATE.tipIndex], null, 0x00BFFF, "small", 0); }, CONFIG.TIP_INTERVALO_MS);
+    setInterval(() => { if (!STATE.partidoEnCurso) return; STATE.tipIndex = ((STATE.tipIndex ?? -1) + 1) % TIPS_SALA.length; msgSmall(TIPS_SALA[STATE.tipIndex], null, COLORES.info, "small", 0); }, CONFIG.TIP_INTERVALO_MS);
     setTimeout(() => { setInterval(pollGlobalesJugadores, CONFIG.BAN_POLL_INTERVAL_MS); }, 5000);
 
     let elTick = Date.now();
@@ -3465,7 +3494,7 @@ setInterval(guardarVerif, 30000);
 
     STATE.progEcoInterval = setInterval(() => {
         if (STATE.room && !STATE.partidoEnCurso) {
-            sendAnnouncement(`\ud83d\udce2 ${ANUNCIOS[STATE.anuncioIndex % ANUNCIOS.length]}`, null, 0x00BFFF, "small", 1);
+            sendAnnouncement(`\ud83d\udce2 ${ANUNCIOS[STATE.anuncioIndex % ANUNCIOS.length]}`, null, COLORES.info, "small", 1);
             STATE.anuncioIndex++;
         }
     }, 180000 + Math.floor(Math.random() * 120000));
@@ -3484,7 +3513,7 @@ setInterval(guardarVerif, 30000);
         if (STATE.partidoEnCurso) {
             STATE.room.getPlayerList().forEach(pl => {
                 const s = STATE.baseDatos[getPlayerKey(pl)];
-                if (s && !s.vip_perma && s.vip_expira && ahora > s.vip_expira) { s.vip = false; s.vip_expira = null; s.vip_tier = "vip"; markDirty(getPlayerKey(pl)); msgSmall("⌛ Tu VIP expiró", pl.id, 0xFFAA00, "small", 0); }
+                if (s && !s.vip_perma && s.vip_expira && ahora > s.vip_expira) { s.vip = false; s.vip_expira = null; s.vip_tier = "vip"; markDirty(getPlayerKey(pl)); msgSmall("⌛ Tu VIP expiró", pl.id, COLORES.advertencia, "small", 0); }
             });
         }
         if (STATE.adminsAutomaticos.size) STATE.room.getPlayerList().forEach(pl => { const a = STATE.authPorId.get(pl.id); if (a && STATE.adminsAutomaticos.has(a) && !pl.admin) safeOperation(() => STATE.room.setPlayerAdmin(pl.id, true)); });
