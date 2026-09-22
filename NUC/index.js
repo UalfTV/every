@@ -357,8 +357,7 @@ function msgInfo(t, ti = null) { sendAnnouncement(`💡 ${t}`, ti, 0x00BFFF, "sm
 function msgGame(t, ti = null, c = 0xFFFFFF, so = 1) { sendAnnouncement(`⚽ ${t}`, ti, c, "small", so); }
 function footerRanking() { return `📊 Sobre ${Object.keys(STATE.baseDatos).length} jugadores`; }
 function validarCantidad(c, min = 0, max = Infinity) { return !isNaN(c) && c >= min && c <= max; }
-function safeOperation(op, fb = null) { try { return op(); } catch (e) { return fb; } }
-function limpiarCache() {
+    try { return op(); } catch (e) { logMsg('errors.log', `[${ROOM_ID}] SafeOp: ${e.message}`); return fb; }function limpiarCache() {
     const now = Date.now();
     for (const [k, ts] of STATE.caches.timestamps.entries()) if (now - ts > CONFIG.CACHE_TTL) { STATE.caches.titulos.delete(k); STATE.caches.badges.delete(k); STATE.caches.timestamps.delete(k); }
 }
@@ -2907,7 +2906,7 @@ function setupEvents() {
             delete STATE.playerPositions[player.id]; delete STATE.playerLastMove[player.id];
             STATE.authPorId.delete(player.id); STATE.connPorId.delete(player.id);
             STATE.radioJugadorCache.delete(player.id);
-            const ig = STATE.animacionGolIntervalos.get(player.id); if (ig) clearInterval(ig);
+            const ig = STATE.animacionGolIntervalos.get(player.id); if (ig) clearInterval(ig); STATE.animacionGolIntervalos.delete(player.id);
             STATE.animacionGolIntervalos.delete(player.id); STATE.animacionGolActiva.delete(player.id); STATE.animacionGolTokenPorId.delete(player.id);
             if (STATE.partidoEnCurso) for (const t of [1, 2]) if (STATE.capitanes[t] === player.id) asegurarCapitan(t, { anunciar: true });
             if (STATE.automatizadoActivado) ejecutarAutomatizado();
@@ -3086,7 +3085,7 @@ function setupEvents() {
             if (sc) STATE.ultimoMarcadorConocido = { red: sc.red, blue: sc.blue, time: sc.time, scoreLimit: sc.scoreLimit, timeLimit: sc.timeLimit };
             if (STATE.liveStatsMessageId) editarMensajeLive(STATE.liveStatsMessageId, embedEstadoSala());
             const reap = () => STATE.room.getPlayerList().filter(p => p.team !== 0 && !STATE.animacionGolActiva.has(p.id)).forEach(aplicarTamanoPersistente);
-            setTimeout(reap, 100); setTimeout(reap, 400);
+            setTimeout(reap, 100);
         } catch (e) { logMsg('errors.log', `[${ROOM_ID}] Error onTeamGoal: ${e.message}\n${e.stack}`); }
     };
 
@@ -3154,17 +3153,32 @@ function setupEvents() {
             if (STATE.rainbowEquipoActivo) { restaurarCamisetaEquipo(STATE.rainbowEquipoActivo.team, STATE.rainbowEquipoActivo.colorOriginal); STATE.rainbowEquipoActivo = null; }
             limpiarCapitanes();
             if (STATE.liveStatsMessageId) editarMensajeLive(STATE.liveStatsMessageId, embedEstadoSala());
-            const sc = STATE.ultimoMarcadorConocido;
+            // Obtener el marcador FINAL directamente del motor, no de STATE.ultimoMarcadorConocido
+            // que puede estar desactualizado. Esto es CRITICO para que el ELO se guarde correctamente
+            const sc = safeOperation(() => STATE.room.getScores()) || STATE.ultimoMarcadorConocido;
             const sinLim = sc && sc.timeLimit === 0 && sc.scoreLimit === 0;
-            const nat = sc && ((sc.timeLimit > 0 && sc.time >= sc.timeLimit * 60) || (sc.scoreLimit > 0 && (sc.red >= sc.scoreLimit || sc.blue >= sc.scoreLimit)) || (sinLim && (Date.now() - STATE.inicioPartido) > 30000));
-            if (!nat) {
+            // Verificar si el partido termino de forma natural:
+            // - Por tiempo: tiempo actual >= limite de tiempo
+            // - Por goles: alguno de los equipos alcanzo el limite de goles
+            // - Sin limites: partido sin tiempo ni goles limite, pero duro mas de 30 segundos
+            const tiempoAlcanzado = sc && sc.timeLimit > 0 && sc.time >= sc.timeLimit * 60;
+            const golesAlcanzados = sc && sc.scoreLimit > 0 && (sc.red >= sc.scoreLimit || sc.blue >= sc.scoreLimit);
+            const sinLimitesValido = sinLim && (Date.now() - STATE.inicioPartido) > 30000;
+            const nat = sc && (tiempoAlcanzado || golesAlcanzados || sinLimitesValido);
+            // SOLO cancelar si el partido NO termino naturalmente Y no hay jugadores en equipos
+            // Si hay jugadores en equipos, asumimos que el partido termino y procesamos el ELO
+            const ps = STATE.room.getPlayerList();
+            const jugadoresEnEquipos = ps.filter(p => p.team === 1 || p.team === 2).length;
+            if (!nat && jugadoresEnEquipos === 0) {
                 safeOperation(() => STATE.room.stopRecording());
-                msgSmall(`🛑 Partido detenido, sin cambios de ELO`, null, 0xFF3366, "small-bold", 1);
+                msgSmall(`\ud83d\uded1 Partido detenido, sin cambios de ELO`, null, 0xFF3366, "small-bold", 1);
                 STATE.room.getPlayerList().forEach(p => { const k = getPlayerKey(p); if (STATE.baseDatos[k]) STATE.baseDatos[k].jugando = false; });
                 Object.values(STATE.apuestas).forEach(a => { const s = STATE.baseDatos[a.key]; if (s) s.monedas += a.cantidad; });
                 if (Object.keys(STATE.apuestas).length) msgInfo("Apuestas reembolsadas", null);
                 STATE.apuestas = {}; markDirty(); return;
             }
+            // Si el partido no termino naturalmente pero hay jugadores, lo tratamos como natural
+            // para que se guarde el ELO. Esto evita el problema de partidos cerrados abruptamente.
             const gan = sc.red > sc.blue ? 1 : (sc.blue > sc.red ? 2 : 0);
             try {
                 const buf = STATE.room.stopRecording();
@@ -3172,9 +3186,6 @@ function setupEvents() {
             } catch (e) { logMsg('errors.log', `[${ROOM_ID}] Error replay: ${e.message}`); }
             STATE.records.partidosTotalesLiga = (STATE.records.partidosTotalesLiga || 0) + 1; markDirty();
             Object.entries(STATE.apuestas).forEach(([pid, a]) => { const s = STATE.baseDatos[a.key]; if (!s) return; if (a.equipo === gan) { const pr = Math.round(a.cantidad * CONFIG.CUOTA_APUESTA); s.monedas += pr; msgSmall(`🎰 Apuesta ganada +${pr}💰`, parseInt(pid, 10), 0x00FF88, "small-bold", 1); } });
-            STATE.apuestas = {};
-
-            const ps = STATE.room.getPlayerList();
             const r = ps.filter(p => p.team === 1), a = ps.filter(p => p.team === 2);
             const mr = r.length ? r.reduce((s, p) => s + (STATE.baseDatos[getPlayerKey(p)]?.mmr || 1000), 0) / r.length : 1000;
             const ma = a.length ? a.reduce((s, p) => s + (STATE.baseDatos[getPlayerKey(p)]?.mmr || 1000), 0) / a.length : 1000;
@@ -3336,6 +3347,11 @@ async function shutdown(señal) {
     if (apagando) return; apagando = true;
     console.log(`\n🛑 [${ROOM_ID}] Señal ${señal}. Guardando...`);
     clearInterval(STATE.liveStatsTimer); clearInterval(STATE.historialTimer);
+    clearInterval(STATE.progEcoInterval);
+    clearInterval(STATE.afkCheckInterval);
+    clearTimeout(STATE.eventoTimer);
+    clearTimeout(STATE.vipBallColorTimeout);
+    clearTimeout(STATE.fS);
     const fS = setTimeout(() => { console.error("⏱️ Timeout apagando."); process.exit(1); }, 15000);
     fS.unref?.();
     try {
@@ -3447,10 +3463,15 @@ setInterval(guardarVerif, 30000);
     let elTick = Date.now();
     setInterval(() => { const a = Date.now(); const lag = a - elTick - 500; elTick = a; if (lag > 50) logMsg('perf.log', `[${ROOM_ID}] Event loop bloqueado ~${lag}ms`); }, 500);
 
-    function progEco() { const e = 180000 + Math.floor(Math.random() * 120000); setTimeout(() => { if (STATE.room && !STATE.partidoEnCurso) { sendAnnouncement(`📢 ${ANUNCIOS[STATE.anuncioIndex % ANUNCIOS.length]}`, null, 0x00BFFF, "small", 1); STATE.anuncioIndex++; } progEco(); }, e); }
+    STATE.progEcoInterval = setInterval(() => {
+        if (STATE.room && !STATE.partidoEnCurso) {
+            sendAnnouncement(`\ud83d\udce2 ${ANUNCIOS[STATE.anuncioIndex % ANUNCIOS.length]}`, null, 0x00BFFF, "small", 1);
+            STATE.anuncioIndex++;
+        }
+    }, 180000 + Math.floor(Math.random() * 120000));
     progEco();
     setInterval(() => { if (STATE.room) { sendAnnouncement(`📢 ${ANUNCIOS_DISCORD[STATE.anuncioDiscordIndex % ANUNCIOS_DISCORD.length]}`, null, 0x5865F2, "small", 1); STATE.anuncioDiscordIndex++; } }, 45000);
-    setInterval(() => { if (STATE.partidoEnCurso) checkAFK(); }, 3000);
+    STATE.afkCheckInterval = setInterval(() => { if (STATE.partidoEnCurso) checkAFK(); }, 3000);
 
     setInterval(() => {
         const ahora = Date.now();

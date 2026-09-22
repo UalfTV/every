@@ -139,7 +139,10 @@ function getPool(overrides = {}) {
 
         poolInstance = new Pool(cfg);
         poolInstance.on("error", (err) => {
-            console.error("❌ Error inesperado en el pool de PostgreSQL (sala):", err.message);
+            log.error("Error en pool de conexiones", err);
+                // Intentar reconectar después de 5 segundos
+                setTimeout(() => { poolInstance = null; getPool().connect().catch(() => {}); }, 5000);
+                console.error("❌ Error inesperado en el pool de PostgreSQL (sala):", err.message);
         });
     }
     return poolInstance;
