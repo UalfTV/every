@@ -1,0 +1,871 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BahiaClient · Admin</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.19.0/dist/tabler-icons.min.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css"/>
+<style>
+:root{
+  --bg:#07070d;--bg-2:#0b0b14;
+  --surface:#101019;--surface-2:#15151f;--surface-3:#1a1a25;
+  --border:rgba(255,255,255,.055);--border-2:rgba(255,255,255,.1);
+  --text:#eceef5;--text-2:#9494ab;--text-3:#55556b;
+  --accent-1:#7c3aed;--accent-2:#a855f7;--accent-3:#ec4899;
+  --grad:linear-gradient(135deg,#7c3aed,#a855f7 55%,#ec4899);
+  --grad-soft:linear-gradient(135deg,rgba(124,58,237,.14),rgba(236,72,153,.08));
+  --good:#10b981;--good-2:#34d399;
+  --warn:#f59e0b;--bad:#f43f5e;--bad-2:#fb7185;
+  --r:12px;--r-sm:8px;--r-lg:18px;
+  --sh-sm:0 1px 2px rgba(0,0,0,.4),0 2px 6px rgba(0,0,0,.25);
+  --sh-md:0 4px 16px rgba(0,0,0,.5),0 8px 32px rgba(0,0,0,.3);
+  --sh-lg:0 12px 48px rgba(0,0,0,.6);
+  --ease:cubic-bezier(.22,.85,.32,1);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  font-family:'Geist',system-ui,-apple-system,sans-serif;
+  background:var(--bg);color:var(--text);font-size:13.5px;
+  -webkit-font-smoothing:antialiased;line-height:1.5;
+  min-height:100vh;overflow-x:hidden;
+}
+body::before{
+  content:'';position:fixed;top:-400px;left:50%;transform:translateX(-50%);
+  width:1400px;height:600px;pointer-events:none;z-index:0;
+  background:
+    radial-gradient(ellipse at 30% 20%,rgba(124,58,237,.14),transparent 55%),
+    radial-gradient(ellipse at 70% 30%,rgba(236,72,153,.1),transparent 55%);
+  filter:blur(20px);
+}
+input,button,select{font-family:inherit;font-size:inherit;color:inherit}
+button{border:none;background:none;cursor:pointer}
+input[type=text],input[type=password]{
+  width:100%;background:var(--surface-2);border:1px solid var(--border-2);
+  border-radius:var(--r-sm);padding:9px 12px;color:var(--text);outline:none;
+  transition:border-color .2s,background .2s,box-shadow .2s;
+}
+input:focus{border-color:rgba(167,139,250,.5);background:rgba(124,58,237,.05);box-shadow:0 0 0 3px rgba(124,58,237,.1)}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:rgba(255,255,255,.08);border-radius:4px;border:2px solid transparent;background-clip:content-box}
+::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.14);background-clip:content-box}
+
+.login-view{
+  position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+  z-index:100;background:var(--bg);
+}
+.login-card{
+  width:100%;max-width:420px;padding:36px 32px;
+  background:linear-gradient(175deg,rgba(20,20,32,.98),rgba(14,14,22,.98));
+  border:1px solid var(--border-2);border-radius:var(--r-lg);
+  box-shadow:var(--sh-lg);position:relative;overflow:hidden;
+  animation:cardIn .4s var(--ease);
+}
+@keyframes cardIn{from{opacity:0;transform:translateY(16px) scale(.97)}to{opacity:1;transform:none}}
+.login-card::before{
+  content:'';position:absolute;top:0;left:0;right:0;height:2px;background:var(--grad);
+}
+.login-logo{
+  width:52px;height:52px;border-radius:14px;background:var(--grad);
+  display:flex;align-items:center;justify-content:center;
+  font-size:18px;font-weight:800;color:#fff;letter-spacing:-.5px;
+  margin-bottom:18px;box-shadow:0 8px 24px rgba(124,58,237,.4);
+}
+.login-card h2{font-size:19px;font-weight:800;margin-bottom:6px;letter-spacing:-.3px}
+.login-card p{font-size:12.5px;color:var(--text-2);margin-bottom:20px;line-height:1.55}
+.login-error{color:var(--bad-2);font-size:12px;margin-top:10px;min-height:16px}
+.btn{
+  display:inline-flex;align-items:center;gap:7px;
+  padding:9px 16px;border-radius:var(--r-sm);
+  font-weight:600;font-size:12.5px;letter-spacing:-.1px;
+  transition:all .2s var(--ease);white-space:nowrap;
+}
+.btn-primary{
+  background:var(--grad);color:#fff;
+  box-shadow:0 4px 16px rgba(124,58,237,.35),inset 0 0 0 1px rgba(255,255,255,.1);
+}
+.btn-primary:hover{transform:translateY(-1px);box-shadow:0 6px 22px rgba(124,58,237,.5),inset 0 0 0 1px rgba(255,255,255,.15)}
+.btn-primary:active{transform:translateY(0) scale(.97)}
+.btn-primary:disabled{opacity:.5;cursor:not-allowed;transform:none}
+.btn-ghost{background:rgba(255,255,255,.04);border:1px solid var(--border-2);color:var(--text-2)}
+.btn-ghost:hover{background:rgba(255,255,255,.08);color:var(--text);border-color:rgba(255,255,255,.16)}
+.btn-ghost:disabled{opacity:.5;cursor:not-allowed}
+.btn-danger{background:rgba(244,63,94,.12);border:1px solid rgba(244,63,94,.3);color:var(--bad-2)}
+.btn-danger:hover{background:rgba(244,63,94,.2)}
+.btn-success{background:rgba(16,185,129,.12);border:1px solid rgba(16,185,129,.3);color:var(--good-2)}
+.btn-success:hover{background:rgba(16,185,129,.2)}
+.btn-sm{padding:5px 10px;font-size:11px}
+
+.app{position:relative;z-index:1;max-width:1500px;margin:0 auto;padding:22px 26px 60px}
+.topbar{
+  display:flex;align-items:center;gap:14px;margin-bottom:26px;
+  padding:0 2px;
+}
+.brand{display:flex;align-items:center;gap:11px}
+.brand-mark{
+  width:38px;height:38px;border-radius:11px;background:var(--grad);
+  display:flex;align-items:center;justify-content:center;
+  font-size:13.5px;font-weight:800;color:#fff;letter-spacing:-.5px;
+  box-shadow:0 6px 20px rgba(124,58,237,.35);
+}
+.brand-text h1{font-size:17px;font-weight:800;letter-spacing:-.4px;line-height:1.1}
+.brand-text h1 span{background:var(--grad);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.brand-text .sub{font-size:10.5px;color:var(--text-3);font-weight:600;letter-spacing:.2px;margin-top:2px}
+.topbar-spacer{flex:1}
+.live{
+  display:inline-flex;align-items:center;gap:8px;padding:6px 12px;
+  background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.24);
+  border-radius:20px;font-size:11px;font-weight:700;color:var(--good-2);
+  letter-spacing:.2px;
+}
+.live .dot{
+  width:6px;height:6px;border-radius:50%;background:var(--good);
+  box-shadow:0 0 8px rgba(16,185,129,.9);
+  animation:pulse 2s ease-in-out infinite;
+}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.75)}}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:20px}
+.stat{
+  position:relative;padding:16px 18px;overflow:hidden;
+  background:linear-gradient(175deg,var(--surface),var(--surface-2));
+  border:1px solid var(--border);border-radius:var(--r);
+  transition:all .25s var(--ease);
+}
+.stat:hover{border-color:var(--border-2);transform:translateY(-2px);box-shadow:var(--sh-md)}
+.stat::after{
+  content:'';position:absolute;top:-40px;right:-40px;width:120px;height:120px;
+  border-radius:50%;background:radial-gradient(circle,rgba(124,58,237,.14),transparent 70%);
+  pointer-events:none;
+}
+.stat-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.stat-label{font-size:10.5px;font-weight:700;letter-spacing:.6px;color:var(--text-3);text-transform:uppercase}
+.stat-icon{
+  width:30px;height:30px;border-radius:9px;
+  display:flex;align-items:center;justify-content:center;
+  font-size:16px;background:var(--grad-soft);
+  border:1px solid var(--border-2);color:#c4b5fd;
+}
+.stat-value{font-size:28px;font-weight:800;letter-spacing:-.8px;color:#fff;line-height:1;font-variant-numeric:tabular-nums}
+.stat.online .stat-value{color:var(--good-2)}
+.stat.blocked .stat-value{color:var(--bad-2)}
+.stat.beta .stat-value{background:var(--grad);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+
+.section{
+  background:linear-gradient(175deg,var(--surface),var(--surface-2));
+  border:1px solid var(--border);border-radius:var(--r-lg);
+  padding:20px;margin-bottom:18px;
+}
+.section-head{display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap}
+.section-title{font-size:14.5px;font-weight:800;letter-spacing:-.2px;display:flex;align-items:center;gap:9px}
+.section-title i{color:#c4b5fd;font-size:17px}
+.section-head .spacer{flex:1}
+.search{
+  display:flex;align-items:center;gap:8px;
+  background:var(--surface-3);border:1px solid var(--border);
+  border-radius:var(--r-sm);padding:0 11px;min-width:220px;
+  transition:all .2s;
+}
+.search:focus-within{border-color:rgba(167,139,250,.45);background:rgba(124,58,237,.05);box-shadow:0 0 0 3px rgba(124,58,237,.1)}
+.search i{color:var(--text-3);font-size:14px}
+.search input{background:transparent;border:none;padding:8px 0;box-shadow:none!important}
+.search input:focus{background:transparent;box-shadow:none}
+
+.table-wrap{overflow-x:auto;margin:0 -20px;padding:0 20px}
+table{width:100%;border-collapse:separate;border-spacing:0;font-size:12.5px}
+thead th{
+  position:sticky;top:0;z-index:2;
+  font-size:10px;text-transform:uppercase;letter-spacing:.7px;font-weight:800;
+  color:var(--text-3);text-align:left;padding:10px 12px;
+  border-bottom:1px solid var(--border-2);
+  background:var(--surface);
+}
+tbody td{padding:12px;border-bottom:1px solid var(--border);vertical-align:top}
+tbody tr{transition:background .15s}
+tbody tr:hover td{background:rgba(124,58,237,.03)}
+tbody tr:last-child td{border-bottom:none}
+
+.user-cell{display:flex;align-items:center;gap:11px}
+.user-avatar{
+  width:36px;height:36px;border-radius:10px;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;
+  font-size:12px;font-weight:800;color:#fff;letter-spacing:-.3px;
+  background:var(--grad);position:relative;
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.1);
+}
+.user-avatar img{width:100%;height:100%;border-radius:inherit;object-fit:cover}
+.user-avatar .status-dot{
+  position:absolute;bottom:-2px;right:-2px;width:11px;height:11px;border-radius:50%;
+  border:2px solid var(--surface);background:var(--text-3);
+}
+.user-avatar .status-dot.on{background:var(--good);box-shadow:0 0 6px rgba(16,185,129,.9)}
+.user-avatar .status-dot.blocked{background:var(--bad)}
+.user-name{font-weight:700;color:var(--text);letter-spacing:-.15px}
+.user-id{font-family:'Geist Mono','SF Mono',monospace;font-size:10.5px;color:var(--text-3);margin-top:2px}
+.key-pill{
+  display:inline-block;padding:3px 8px;border-radius:6px;
+  font-family:'Geist Mono',monospace;font-size:10.5px;font-weight:600;
+  color:#c4b5fd;background:rgba(124,58,237,.1);
+  border:1px solid rgba(124,58,237,.24);
+}
+.geo-cell{font-size:11.5px;color:var(--text-2);line-height:1.5}
+.geo-cell b{color:var(--text);font-weight:700}
+.geo-cell .ip{font-family:'Geist Mono',monospace;font-size:10.5px;color:var(--text-3);margin-top:2px}
+.badge{
+  display:inline-flex;align-items:center;gap:5px;
+  padding:3px 9px;border-radius:20px;font-size:10.5px;font-weight:800;
+  letter-spacing:.2px;text-transform:uppercase;
+}
+.badge.online{background:rgba(16,185,129,.12);color:var(--good-2);border:1px solid rgba(16,185,129,.28)}
+.badge.offline{background:rgba(255,255,255,.04);color:var(--text-3);border:1px solid var(--border-2)}
+.badge.blocked{background:rgba(244,63,94,.12);color:var(--bad-2);border:1px solid rgba(244,63,94,.28)}
+.badge .dot{width:5px;height:5px;border-radius:50%;background:currentColor}
+.badge.online .dot{animation:pulse 2s ease-in-out infinite}
+
+.notes-input{
+  width:140px;padding:5px 8px;font-size:11px;
+  background:var(--surface-3);border:1px solid var(--border);
+  border-radius:6px;color:var(--text-2);
+  transition:all .2s;
+}
+.notes-input:focus{background:rgba(124,58,237,.05);border-color:rgba(167,139,250,.4);color:var(--text)}
+.row-actions{display:flex;gap:5px;flex-wrap:wrap}
+.icon-btn{
+  width:28px;height:28px;border-radius:7px;display:inline-flex;align-items:center;justify-content:center;
+  background:rgba(255,255,255,.035);border:1px solid var(--border-2);
+  color:var(--text-2);font-size:14px;transition:all .18s var(--ease);
+}
+.icon-btn:hover{background:rgba(255,255,255,.08);color:var(--text);transform:translateY(-1px)}
+.icon-btn.danger:hover{background:rgba(244,63,94,.15);color:var(--bad-2);border-color:rgba(244,63,94,.3)}
+.icon-btn.success:hover{background:rgba(16,185,129,.15);color:var(--good-2);border-color:rgba(16,185,129,.3)}
+
+.empty{padding:60px 20px;text-align:center;color:var(--text-3)}
+.empty i{font-size:36px;display:block;margin-bottom:12px;opacity:.4}
+.empty p{font-size:13px;font-weight:500}
+
+#map{
+  height:520px;border-radius:var(--r);
+  border:1px solid var(--border);
+  overflow:hidden;
+}
+.leaflet-container{background:#0a0a12!important;font-family:inherit}
+.leaflet-popup-content-wrapper{
+  background:var(--surface)!important;color:var(--text)!important;
+  border:1px solid var(--border-2)!important;border-radius:var(--r)!important;
+  box-shadow:var(--sh-lg)!important;padding:0!important;
+}
+.leaflet-popup-content{margin:0!important;padding:14px 16px!important;font-size:12px;line-height:1.5}
+.leaflet-popup-tip{background:var(--surface)!important;border:1px solid var(--border-2)!important}
+.leaflet-popup-close-button{color:var(--text-3)!important;padding:6px 8px 0 0!important}
+.leaflet-popup-close-button:hover{color:var(--text)!important}
+.map-popup-name{font-weight:800;font-size:13px;margin-bottom:4px;color:var(--text)}
+.map-popup-geo{color:var(--text-2);font-size:11px;margin-bottom:6px}
+.map-popup-key{font-family:'Geist Mono',monospace;font-size:10.5px;color:#c4b5fd;background:rgba(124,58,237,.1);padding:2px 6px;border-radius:5px;display:inline-block;margin-bottom:6px}
+.map-popup-badge{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:800;letter-spacing:.2px;text-transform:uppercase;padding:2px 7px;border-radius:10px}
+.map-popup-badge.online{background:rgba(16,185,129,.15);color:var(--good-2)}
+.map-popup-badge.offline{background:rgba(255,255,255,.05);color:var(--text-3)}
+.map-popup-badge.blocked{background:rgba(244,63,94,.15);color:var(--bad-2)}
+.map-popup-badge.precise{background:rgba(34,211,238,.12);color:#67e8f9;margin-left:4px}
+
+.user-marker{background:transparent!important;border:none!important}
+
+.role-select{
+  padding:5px 26px 5px 10px;
+  font-size:11px;
+  font-weight:700;
+  letter-spacing:.2px;
+  border-radius:7px;
+  border:1px solid var(--border-2);
+  background:var(--surface-3);
+  color:var(--text-2);
+  cursor:pointer;
+  appearance:none;
+  -webkit-appearance:none;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239494ab' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-repeat:no-repeat;
+  background-position:right 6px center;
+  background-size:11px;
+  transition:all .15s var(--ease);
+  font-family:inherit;
+  min-width:130px;
+}
+.role-select:hover{border-color:rgba(167,139,250,.4);background-color:rgba(124,58,237,.05)}
+.role-select:focus{outline:none;border-color:rgba(167,139,250,.6);box-shadow:0 0 0 3px rgba(124,58,237,.15)}
+.role-select option{background:#15151f;color:#eceef5}
+
+.role-select.role-member{color:#9494ab;border-color:var(--border-2)}
+.role-select.role-helper{color:#67e8f9;border-color:rgba(34,211,238,.35);background-color:rgba(34,211,238,.06)}
+.role-select.role-tester{color:#c4b5fd;border-color:rgba(124,58,237,.35);background-color:rgba(124,58,237,.06)}
+.role-select.role-beta_tester{color:#fcd34d;border-color:rgba(245,158,11,.35);background-color:rgba(245,158,11,.06)}
+.role-select.role-mod{color:#86efac;border-color:rgba(16,185,129,.35);background-color:rgba(16,185,129,.06)}
+.role-select.role-admin{color:#fb7185;border-color:rgba(244,63,94,.4);background-color:rgba(244,63,94,.08);font-weight:800}
+.role-select.role-dev{color:#f0abfc;border-color:rgba(236,72,153,.4);background-color:rgba(236,72,153,.08);font-weight:800}
+.marker-pin{
+  width:38px;height:38px;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+  font-size:12.5px;font-weight:800;color:#fff;letter-spacing:-.3px;
+  border:2px solid rgba(255,255,255,.85);
+  box-shadow:0 4px 14px rgba(0,0,0,.6),0 0 0 3px rgba(0,0,0,.25);
+  position:relative;transition:transform .2s var(--ease);
+}
+.marker-pin:hover{transform:scale(1.15);z-index:999}
+.marker-pin.online{background:linear-gradient(135deg,#10b981,#059669)}
+.marker-pin.offline{background:linear-gradient(135deg,#7c3aed,#6d28d9)}
+.marker-pin.blocked{background:linear-gradient(135deg,#f43f5e,#dc2626)}
+.marker-pin.online::before{
+  content:'';position:absolute;inset:-6px;border-radius:50%;
+  border:2px solid rgba(16,185,129,.6);
+  animation:markerPulse 2s ease-out infinite;pointer-events:none;
+}
+@keyframes markerPulse{
+  0%{transform:scale(.9);opacity:1}
+  100%{transform:scale(1.6);opacity:0}
+}
+.marker-pin.precise::after{
+  content:'';position:absolute;bottom:-3px;right:-3px;width:12px;height:12px;
+  border-radius:50%;background:#22d3ee;border:2px solid var(--surface);
+  box-shadow:0 0 6px rgba(34,211,238,.8);
+}
+
+.marker-cluster-small,.marker-cluster-medium,.marker-cluster-large{
+  background:rgba(124,58,237,.22)!important;
+}
+.marker-cluster-small div,.marker-cluster-medium div,.marker-cluster-large div{
+  background:linear-gradient(135deg,#7c3aed,#a855f7)!important;
+  color:#fff!important;font-weight:800!important;font-size:12px!important;
+  border:2px solid rgba(255,255,255,.3)!important;
+  box-shadow:0 4px 14px rgba(0,0,0,.5)!important;
+}
+
+.toast-stack{
+  position:fixed;bottom:22px;right:22px;z-index:9999;
+  display:flex;flex-direction:column;gap:8px;pointer-events:none;
+}
+.toast{
+  display:flex;align-items:center;gap:10px;
+  padding:11px 16px;min-width:240px;max-width:360px;
+  background:linear-gradient(175deg,var(--surface),var(--surface-2));
+  border:1px solid var(--border-2);border-radius:var(--r);
+  box-shadow:var(--sh-lg);font-size:12.5px;font-weight:600;color:var(--text);
+  animation:toastIn .3s var(--ease);pointer-events:auto;
+}
+@keyframes toastIn{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:none}}
+.toast.out{animation:toastOut .25s var(--ease) forwards}
+@keyframes toastOut{to{opacity:0;transform:translateX(20px)}}
+.toast-icon{
+  width:26px;height:26px;border-radius:7px;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;font-size:14px;
+}
+.toast.success .toast-icon{background:rgba(16,185,129,.15);color:var(--good-2)}
+.toast.error .toast-icon{background:rgba(244,63,94,.15);color:var(--bad-2)}
+.toast.info .toast-icon{background:rgba(124,58,237,.15);color:#c4b5fd}
+
+@media (max-width:720px){
+  .app{padding:16px}
+  .topbar{flex-wrap:wrap;gap:10px}
+  .search{min-width:0;width:100%}
+  .table-wrap{margin:0 -16px;padding:0 16px}
+  #map{height:380px}
+}
+</style>
+</head>
+<body>
+
+<div class="login-view" id="login-view">
+  <div class="login-card">
+    <div class="login-logo">BC</div>
+    <h2>Panel de administración</h2>
+    <p>Ingresá la BETA_ADMIN_KEY para gestionar usuarios, claves y ubicaciones.</p>
+    <input type="password" id="admin-key" placeholder="BETA_ADMIN_KEY" autocomplete="off">
+    <div class="login-error" id="login-err"></div>
+    <div style="margin-top:16px;text-align:right">
+      <button class="btn btn-primary" id="login-btn" onclick="doLogin()">
+        <i class="ti ti-lock-open"></i> Entrar
+      </button>
+    </div>
+  </div>
+</div>
+
+<div class="app" id="app-view" style="display:none">
+  <div class="topbar">
+    <div class="brand">
+      <div class="brand-mark">BC</div>
+      <div class="brand-text">
+        <h1>Bahia<span>Client</span></h1>
+        <div class="sub">Panel de administración</div>
+      </div>
+    </div>
+    <div class="topbar-spacer"></div>
+    <div class="live"><span class="dot"></span> <span id="live-text">Conectado</span></div>
+    <button class="btn btn-ghost btn-sm" id="btn-refresh" onclick="manualRefresh()"><i class="ti ti-refresh"></i> Refrescar</button>
+    <button class="btn btn-ghost btn-sm" onclick="logout()"><i class="ti ti-logout"></i> Salir</button>
+  </div>
+
+  <div class="stats">
+    <div class="stat">
+      <div class="stat-head">
+        <div class="stat-label">Usuarios totales</div>
+        <div class="stat-icon"><i class="ti ti-users"></i></div>
+      </div>
+      <div class="stat-value" id="s-total">–</div>
+    </div>
+    <div class="stat online">
+      <div class="stat-head">
+        <div class="stat-label">Online ahora</div>
+        <div class="stat-icon" style="background:rgba(16,185,129,.12);color:var(--good-2);border-color:rgba(16,185,129,.28)"><i class="ti ti-wifi"></i></div>
+      </div>
+      <div class="stat-value" id="s-online">–</div>
+    </div>
+    <div class="stat blocked">
+      <div class="stat-head">
+        <div class="stat-label">Bloqueados</div>
+        <div class="stat-icon" style="background:rgba(244,63,94,.12);color:var(--bad-2);border-color:rgba(244,63,94,.28)"><i class="ti ti-lock"></i></div>
+      </div>
+      <div class="stat-value" id="s-blocked">–</div>
+    </div>
+    <div class="stat beta">
+      <div class="stat-head">
+        <div class="stat-label">Beta keys usadas</div>
+        <div class="stat-icon"><i class="ti ti-key"></i></div>
+      </div>
+      <div class="stat-value" id="s-keys">–</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <div class="section-title"><i class="ti ti-user-circle"></i> Usuarios</div>
+      <div class="spacer"></div>
+      <div class="search">
+        <i class="ti ti-search"></i>
+        <input type="text" id="search" placeholder="Buscar nick, ID, rol, IP, ciudad…" oninput="renderUsers()">
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="downloadJson()"><i class="ti ti-download"></i> JSON</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Usuario</th>
+            <th>Rol</th>
+            <th>Beta key</th>
+            <th>Ubicación</th>
+            <th>Actividad</th>
+            <th>Notas</th>
+            <th style="text-align:right">Acciones</th>
+          </tr>
+        </thead>
+        <tbody id="users-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <div class="section-title"><i class="ti ti-map-2"></i> Mapa de usuarios</div>
+      <div class="spacer"></div>
+      <span style="font-size:11px;color:var(--text-3);display:inline-flex;align-items:center;gap:8px">
+        <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:8px;height:8px;border-radius:50%;background:#22d3ee"></span> Ubicación precisa</span>
+        <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:8px;height:8px;border-radius:50%;background:#7c3aed"></span> Por IP</span>
+      </span>
+    </div>
+    <div id="map"></div>
+  </div>
+</div>
+
+<div class="toast-stack" id="toast-stack"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+<script>
+const STORAGE_KEY = 'bc_admin_key';
+const CARTO_KEY = 'cb1_3hs1_1_534357ee57708467c287c340';
+let currentKey = '';
+let usersData = [];
+let map = null;
+let clusterLayer = null;
+let refreshTimer = null;
+let refreshCountdown = 15;
+
+function toast(msg, type = 'info'){
+  const stack = document.getElementById('toast-stack');
+  const icons = { success:'ti-check', error:'ti-alert-circle', info:'ti-info-circle' };
+  const el = document.createElement('div');
+  el.className = 'toast ' + type;
+  el.innerHTML = `<div class="toast-icon"><i class="ti ${icons[type] || icons.info}"></i></div><div>${escapeHtml(msg)}</div>`;
+  stack.appendChild(el);
+  setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 300); }, 3000);
+}
+
+async function api(path, opts){
+  const headers = Object.assign({ 'Content-Type':'application/json', 'x-admin-key': currentKey }, (opts && opts.headers) || {});
+  const res = await fetch(path, Object.assign({}, opts, { headers }));
+  if(res.status === 401){ logout(); throw new Error('Clave inválida'); }
+  if(!res.ok){
+    let msg = 'Error ' + res.status;
+    try { const j = await res.json(); if(j.error) msg = j.error; } catch(_){}
+    throw new Error(msg);
+  }
+  return await res.json();
+}
+
+async function doLogin(){
+  const key = document.getElementById('admin-key').value.trim();
+  const err = document.getElementById('login-err');
+  const btn = document.getElementById('login-btn');
+  err.textContent = '';
+  if(!key){ err.textContent = 'Pegá la clave.'; return; }
+  btn.disabled = true; btn.innerHTML = '<i class="ti ti-loader-2"></i> Verificando…';
+  currentKey = key;
+  try {
+    await api('/admin/users');
+    try { localStorage.setItem(STORAGE_KEY, key); } catch(_){}
+    showApp();
+  } catch(e){
+    currentKey = '';
+    err.textContent = 'No se pudo autenticar: ' + e.message;
+  } finally {
+    btn.disabled = false; btn.innerHTML = '<i class="ti ti-lock-open"></i> Entrar';
+  }
+}
+
+function showApp(){
+  document.getElementById('login-view').style.display = 'none';
+  document.getElementById('app-view').style.display = '';
+  if(!map) initMap();
+  loadUsers();
+  startAutoRefresh();
+}
+function logout(){
+  try { localStorage.removeItem(STORAGE_KEY); } catch(_){}
+  currentKey = '';
+  stopAutoRefresh();
+  document.getElementById('login-view').style.display = 'flex';
+  document.getElementById('app-view').style.display = 'none';
+}
+
+// No interrumpir al admin si está tipeando, tiene un select abierto,
+// o hay un popup de Leaflet activo.
+function _isUserInteracting(){
+  const el = document.activeElement;
+  if(el){
+    const tag = el.tagName;
+    if(tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+  }
+  if(document.querySelector('.leaflet-popup')) return true;
+  return false;
+}
+
+function startAutoRefresh(){
+  stopAutoRefresh();
+  refreshCountdown = 15;
+  refreshTimer = setInterval(() => {
+    if(_isUserInteracting()){
+      refreshCountdown = 15;
+      updateLiveText();
+      return;
+    }
+    refreshCountdown--;
+    updateLiveText();
+    if(refreshCountdown <= 0){ refreshCountdown = 15; loadUsers(); }
+  }, 1000);
+  updateLiveText();
+}
+function stopAutoRefresh(){ clearInterval(refreshTimer); refreshTimer = null; }
+function updateLiveText(){
+  const el = document.getElementById('live-text');
+  if(el) el.textContent = 'Actualiza en ' + refreshCountdown + 's';
+}
+
+async function loadUsers(){
+  try {
+    const data = await api('/admin/users');
+    usersData = data.users || [];
+    document.getElementById('s-total').textContent = data.total ?? 0;
+    document.getElementById('s-online').textContent = data.online ?? 0;
+    document.getElementById('s-blocked').textContent = data.blocked ?? 0;
+    document.getElementById('s-keys').textContent = usersData.filter(u => u.key).length;
+    // Solo re-renderizamos la tabla/mapa si el admin no está interactuando,
+    // para no interrumpir lo que esté escribiendo o seleccionando.
+    if(!_isUserInteracting()){
+      renderUsers();
+      renderMap();
+    }
+  } catch(e){
+    if(e.message !== 'Clave inválida'){
+      const now = Date.now();
+      if(!loadUsers._lastErrToast || (now - loadUsers._lastErrToast) > 60000){
+        loadUsers._lastErrToast = now;
+        toast('Error: ' + e.message, 'error');
+      }
+    }
+  }
+}
+
+async function manualRefresh(){
+  const btn = document.getElementById('btn-refresh');
+  const icon = btn?.querySelector('i');
+  if(btn) btn.disabled = true;
+  if(icon) icon.style.animation = 'spin .7s linear';
+  try { await loadUsers(); }
+  finally {
+    if(btn) btn.disabled = false;
+    if(icon) setTimeout(() => { icon.style.animation = ''; }, 700);
+  }
+}
+
+function escapeHtml(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])) }
+function initials(name){
+  const n = (name || '??').trim();
+  const parts = n.split(/[\s_-]+/).filter(Boolean);
+  if(parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+  return n.slice(0, 2).toUpperCase();
+}
+function timeAgo(ts){
+  if(!ts) return '—';
+  const s = Math.floor((Date.now() - ts)/1000);
+  if(s < 60) return 'hace ' + s + 's';
+  if(s < 3600) return 'hace ' + Math.floor(s/60) + ' min';
+  if(s < 86400) return 'hace ' + Math.floor(s/3600) + ' h';
+  return 'hace ' + Math.floor(s/86400) + ' d';
+}
+function flagEmoji(cc){
+  if(!cc || cc.length !== 2) return '';
+  return String.fromCodePoint(...[...cc.toUpperCase()].map(c => 0x1F1E6 + c.charCodeAt(0) - 65));
+}
+
+function renderUsers(){
+  const q = (document.getElementById('search').value || '').toLowerCase().trim();
+  const filtered = !q ? usersData : usersData.filter(u => {
+    const g = u.geo || {};
+    const hay = [u.nickname, u.key, u.clientId, u.playerId, u.role, g.city, g.country, g.isp, ...(u.ips || [])].filter(Boolean).join(' ').toLowerCase();
+    return hay.includes(q);
+  });
+  const body = document.getElementById('users-body');
+  if(!filtered.length){
+    body.innerHTML = `<tr><td colspan="7"><div class="empty"><i class="ti ti-users-off"></i><p>Sin usuarios que mostrar</p></div></td></tr>`;
+    return;
+  }
+  body.innerHTML = filtered.map(u => {
+    const g = u.geo || {};
+    const pg = u.preciseGeo;
+    const ip = (u.ips && u.ips[0]) || '—';
+    const status = u.blocked ? 'blocked' : (u.online ? 'online' : 'offline');
+    const statusLabel = u.blocked ? 'Bloqueado' : (u.online ? 'Online' : 'Offline');
+    const flag = flagEmoji(g.countryCode);
+    const loc = pg ? 'Precisa' : (g.city || g.country ? 'Por IP' : 'Desconocida');
+    const locDetails = g.city || g.country
+      ? (flag ? flag + ' ' : '') + (g.city || '?') + (g.country ? ', ' + g.country : '') + (g.isp ? ' · ' + g.isp : '')
+      : '<span style="color:var(--text-3)">—</span>';
+    const roleSelect = u.playerId
+      ? `<select class="role-select role-${u.role || 'member'}" data-player-id="${escapeHtml(u.playerId)}">
+           <option value="member"${(u.role === 'member' || !u.role) ? ' selected' : ''}>Miembro</option>
+           <option value="helper"${u.role === 'helper' ? ' selected' : ''}>Helper</option>
+           <option value="tester"${u.role === 'tester' ? ' selected' : ''}>Tester</option>
+           <option value="beta_tester"${u.role === 'beta_tester' ? ' selected' : ''}>Beta Tester</option>
+           <option value="mod"${u.role === 'mod' ? ' selected' : ''}>Moderador</option>
+           <option value="admin"${u.role === 'admin' ? ' selected' : ''}>Admin</option>
+           <option value="dev"${u.role === 'dev' ? ' selected' : ''}>Dev</option>
+         </select>`
+      : `<span style="color:var(--text-3);font-size:11px" title="El usuario todavía no registró un playerId">— sin registrar —</span>`;
+    return `
+      <tr>
+        <td>
+          <div class="user-cell">
+            <div class="user-avatar">${initials(u.nickname)}<div class="status-dot ${u.blocked ? 'blocked' : (u.online ? 'on' : '')}"></div></div>
+            <div style="min-width:0">
+              <div class="user-name">${escapeHtml(u.nickname || '(sin nick)')}</div>
+              <div class="user-id">${escapeHtml(u.clientId.slice(0, 16))}…</div>
+            </div>
+          </div>
+        </td>
+        <td>${roleSelect}</td>
+        <td>${u.key ? `<span class="key-pill">${escapeHtml(u.key)}</span>` : '<span style="color:var(--text-3)">—</span>'}</td>
+        <td>
+          <div class="geo-cell">
+            <div style="font-size:10px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;color:${pg ? '#67e8f9' : 'var(--text-3)'};margin-bottom:3px">${loc}</div>
+            <div>${locDetails}</div>
+            <div class="ip">${escapeHtml(ip)}</div>
+          </div>
+        </td>
+        <td>
+          <div class="geo-cell">
+            <span class="badge ${status}"><span class="dot"></span> ${statusLabel}</span>
+            <div style="margin-top:6px;font-size:11px;color:var(--text-3)">${timeAgo(u.lastSeen)}</div>
+          </div>
+        </td>
+        <td>
+          <input class="notes-input" type="text" value="${escapeHtml(u.notes || '')}" placeholder="notas…"
+            data-client-id="${escapeHtml(u.clientId)}">
+        </td>
+        <td>
+          <div class="row-actions" style="justify-content:flex-end">
+            ${u.blocked
+              ? `<button class="icon-btn success" title="Desbloquear" data-action="unblock" data-client-id="${escapeHtml(u.clientId)}"><i class="ti ti-lock-open"></i></button>`
+              : `<button class="icon-btn danger" title="Bloquear" data-action="block" data-client-id="${escapeHtml(u.clientId)}"><i class="ti ti-lock"></i></button>`}
+            <button class="icon-btn" title="Copiar ID" data-action="copy" data-client-id="${escapeHtml(u.clientId)}"><i class="ti ti-copy"></i></button>
+          </div>
+        </td>
+      </tr>`;
+  }).join('');
+}
+
+// Event delegation: un solo listener para toda la tabla.
+// Evita los problemas de escape de strings en atributos onclick.
+document.getElementById('users-body').addEventListener('change', (e) => {
+  const sel = e.target.closest('select[data-player-id]');
+  if(sel){ setRole(sel.dataset.playerId, sel.value); return; }
+  const notes = e.target.closest('input[data-client-id]');
+  if(notes){ saveNotes(notes.dataset.clientId, notes.value); return; }
+});
+document.getElementById('users-body').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-action]');
+  if(!btn) return;
+  const { action, clientId } = btn.dataset;
+  if(action === 'block')   blockUser(clientId);
+  if(action === 'unblock') unblockUser(clientId);
+  if(action === 'copy')    copyText(clientId);
+});
+
+function initMap(){
+  map = L.map('map', { zoomControl: true, attributionControl: true }).setView([-38.7, -62.3], 4);
+  const tileUrl = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png' + (CARTO_KEY ? '?key=' + CARTO_KEY : '');
+  L.tileLayer(tileUrl, {
+    maxZoom: 19, subdomains: 'abcd',
+    attribution: '&copy; CARTO &copy; OpenStreetMap',
+  }).addTo(map);
+  clusterLayer = L.markerClusterGroup({
+    showCoverageOnHover: false,
+    maxClusterRadius: 50,
+    spiderfyOnMaxZoom: true,
+    chunkedLoading: true,
+  });
+  map.addLayer(clusterLayer);
+}
+
+function renderMap(){
+  if(!map) return;
+  clusterLayer.clearLayers();
+  const points = usersData.map(u => {
+    const pg = u.preciseGeo, g = u.geo;
+    if(pg && typeof pg.lat === 'number' && typeof pg.lon === 'number') return { u, lat: pg.lat, lon: pg.lon, precise: true };
+    if(g && typeof g.lat === 'number' && typeof g.lon === 'number') return { u, lat: g.lat, lon: g.lon, precise: false };
+    return null;
+  }).filter(Boolean);
+
+  if(!points.length) return;
+
+  const bounds = [];
+  for(const { u, lat, lon, precise } of points){
+    const status = u.blocked ? 'blocked' : (u.online ? 'online' : 'offline');
+    const icon = L.divIcon({
+      className: 'user-marker',
+      html: `<div class="marker-pin ${status} ${precise ? 'precise' : ''}">${initials(u.nickname)}</div>`,
+      iconSize: [38, 38],
+      iconAnchor: [19, 19],
+      popupAnchor: [0, -22],
+    });
+    const marker = L.marker([lat, lon], { icon });
+    marker.bindPopup(`
+      <div>
+        <div class="map-popup-name">${escapeHtml(u.nickname || '?')}</div>
+        <div class="map-popup-geo">
+          ${(() => {
+            const g = u.geo || {};
+            const flag = flagEmoji(g.countryCode);
+            const text = [g.city, g.country].filter(Boolean).join(', ');
+            return (flag ? flag + ' ' : '') + (text || 'Sin ubicación');
+          })()}
+        </div>
+        ${u.key ? `<div class="map-popup-key">${escapeHtml(u.key)}</div><br>` : ''}
+        <span class="map-popup-badge ${status}">${status === 'online' ? '● Online' : status === 'blocked' ? '● Bloqueado' : '○ Offline'}</span>
+        ${precise ? '<span class="map-popup-badge precise">◉ Precisa</span>' : ''}
+      </div>
+    `);
+    clusterLayer.addLayer(marker);
+    bounds.push([lat, lon]);
+  }
+
+  if(bounds.length === 1) map.setView(bounds[0], 12);
+  else map.fitBounds(bounds, { padding: [50, 50], maxZoom: 10 });
+}
+
+async function blockUser(clientId){
+  const reason = prompt('Motivo del bloqueo (opcional):', '');
+  if(reason === null) return;
+  try {
+    await api('/admin/user/block', { method:'POST', body: JSON.stringify({ clientId, reason }) });
+    toast('Usuario bloqueado', 'success');
+    loadUsers();
+  } catch(e){ toast('Error: ' + e.message, 'error'); }
+}
+async function unblockUser(clientId){
+  try {
+    await api('/admin/user/unblock', { method:'POST', body: JSON.stringify({ clientId }) });
+    toast('Usuario desbloqueado', 'success');
+    loadUsers();
+  } catch(e){ toast('Error: ' + e.message, 'error'); }
+}
+async function saveNotes(clientId, notes){
+  try {
+    await api('/admin/user/notes', { method:'POST', body: JSON.stringify({ clientId, notes }) });
+    toast('Notas guardadas', 'success');
+  } catch(e){ toast('Error: ' + e.message, 'error'); }
+}
+
+const ROLE_LABELS = {
+  member: 'Miembro', helper: 'Helper', tester: 'Tester',
+  beta_tester: 'Beta Tester', mod: 'Moderador', admin: 'Admin', dev: 'Developer',
+};
+
+async function setRole(playerId, newRole){
+  try {
+    const r = await api('/admin/player/set-role', {
+      method: 'POST',
+      body: JSON.stringify({ playerId, role: newRole }),
+    });
+    if(r && r.unchanged){
+      toast('El rol ya era ese.', 'info');
+      return;
+    }
+    toast(`Rol de ${playerId} cambiado a ${ROLE_LABELS[newRole] || newRole}`, 'success');
+    loadUsers();
+  } catch(e){
+    toast('Error al cambiar rol: ' + e.message, 'error');
+    loadUsers();
+  }
+}
+function copyText(t){
+  navigator.clipboard?.writeText?.(t).then(() => toast('Copiado', 'success')).catch(()=>{});
+}
+function downloadJson(){
+  const blob = new Blob([JSON.stringify(usersData, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'bahiaclient-users-' + new Date().toISOString().slice(0,10) + '.json';
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('Descargando JSON…', 'info');
+}
+
+document.getElementById('admin-key').addEventListener('keydown', e => {
+  if(e.key === 'Enter') doLogin();
+});
+;(function(){
+  try {
+    const k = localStorage.getItem(STORAGE_KEY);
+    if(k){ currentKey = k; api('/admin/users').then(showApp).catch(() => { currentKey = ''; }); }
+  } catch(_){}
+})();
+</script>
+</body>
+</html>
