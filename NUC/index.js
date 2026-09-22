@@ -15,10 +15,10 @@ if (ROOM_CONFIG.PG_OVERRIDES && ROOM_CONFIG.PG_OVERRIDES.database) process.env.P
 // ============================================
 
 const EMOJIS = {
-    success: "\u2705", error: "\u274c", warning: "\u26a0\ufe0f", info: "\ud83d\udca1",
+    success: "\u2705", error: "\u274c", warning: "\u26a0\ufe0f", info: "\u2139\ufe0f",
     soccer: "\u26bd", goal: "\u26bd", trophy: "\ud83c\udfc6",
-    coins: "\ud83d\udcb0", money: "\ud83d\udcb5", shop: "\ud83d\udecd", gift: "\ud83c\udf81",
-    red: "\ud83d\udd34", blue: "\ud83d\udd35", vs: "\u2694\ufe0f",
+    coins: "\ud83d\udcb0", money: "\ud83d\udcb5", shop: "\ud83d\udecd", gift: "${EMOJIS.coins}",
+    red: "\ud83d\udd34", blue: "\ud83d\udd35", vs: "${EMOJIS.vs}",
     fire: "\ud83d\udd25", star: "\u2605", sparkles: "\u2728", crown: "\ud83d\udc51",
     person: "\ud83d\udc64", people: "\ud83d\udc65", clock: "\u23f1\ufe0f",
     message: "\ud83d\udcac", megaphone: "\ud83d\udce3", checkered: "\ud83c\udf1f",
@@ -46,6 +46,19 @@ const {
     deletePlayerLocal, deletePlayersLocalBatch, deletePlayerGlobalRow, liberarReservasHuerfanas,
     closePool, getPool, getGlobalPool, setBotState, getBotState, marcarProcesoApagado,
 } = require("./db/database.js");
+
+
+const Logger = {
+    info: (msg) => logMsg('info.log', `[${ROOM_ID}] ${msg}`),
+    warn: (msg) => logMsg('warn.log', `[${ROOM_ID}] ${EMOJIS.warning} ${msg}`),
+    error: (msg, error = null) => {
+        const stack = error ? `\n${error.stack}` : '';
+        logMsg('errors.log', `[${ROOM_ID}] ${EMOJIS.error} ${msg}${stack}`);
+    },
+    debug: (msg) => {
+        if (CONFIG.DEBUG_MODE) logMsg('debug.log', `[${ROOM_ID}] ${EMOJIS.info} ${msg}`);
+    }
+};
 
 const HTTP_AGENT = new http.Agent({ keepAlive: true, maxSockets: 4 });
 const HTTPS_AGENT = new https.Agent({ keepAlive: true, maxSockets: 4 });
@@ -108,8 +121,8 @@ const CONFIG = {
     GK_SUGERIR_ZONA_DISTANCIA: 150, GK_SUGERIR_TIEMPO_MS: 40000, GK_SUGERIR_COOLDOWN_MS: 90000,
     CAPITAN_AVATAR: "Ⓒ", CAPITAN_SIZE_BONUS: 0,
     REQUIRE_AUTH_TO_PLAY: false, BAN_POLL_INTERVAL_MS: 60000,
-    CAJA_PROBABILIDAD: 0.07, CAJA_MONEDAS_MIN: 75, CAJA_MONEDAS_MAX: 350,
-    MVP_XP: 50, MVP_MONEDAS: 75, TIP_INTERVALO_MS: 240000,
+    CAJA_PROBABILIDAD: 0.10, CAJA_MONEDAS_MIN: 80, CAJA_MONEDAS_MAX: 300,
+    MVP_XP: 50, MVP_MONEDAS: 100, TIP_INTERVALO_MS: 240000,
 
     MIN_PLAYERS_VOTE: 4, PORCENTAJE_VOTOS: 50, COOLDOWN_VOTE: 60000,
     AFK_DETECT_MS: 90000, AFK_KICK_MS: 20000, AFK_WARN_MS: 10000,
@@ -127,7 +140,7 @@ const CONFIG = {
     AFK_TOGGLE_COOLDOWN_MS: 10000,
 
     JUGAR_COOLDOWN_MS: 60000,
-    MAX_APUESTA: 1000, MAX_DUELO: 500, MAX_RULETA: 500, CUOTA_APUESTA: 1.9,
+    MAX_APUESTA: 750, MAX_DUELO: 300, MAX_RULETA: 500, CUOTA_APUESTA: 1.9,
     MAX_TOQUES_RECIENTES: 20, CACHE_TTL: 60000, ASISTENCIA_VENTANA_MS: 5000,
     ATAJADA_MIN_KMH: 35, ATAJADA_ZONA_DISTANCIA: 220, ATAJADA_VENTANA_MS: 1500,
 
@@ -171,6 +184,12 @@ const CONFIG = {
     RULETA_VERDE_PAYOUT: 33, RULETA_ROJO_NEGRO_PAYOUT: 2,
 };
 
+
+
+const RACHA_BONUS = {
+    xp: [0, 0, 5, 10, 15, 25, 35, 50, 75, 100, 150],
+    monedas: [0, 0, 10, 20, 30, 50, 75, 100, 150, 200, 300]
+};
 Object.assign(CONFIG, ROOM_CONFIG.CONFIG_OVERRIDES || {});
 console.log("CONFIG FINAL:", CONFIG.NOMBRE_SALA, CONFIG.MAX_JUGADORES_SALA);
 const ROOM_ID = ROOM_CONFIG.ROOM_ID || "HA";
@@ -385,18 +404,42 @@ function msgWarn(t, ti = null) { sendAnnouncement(`⚠️ ${t}`, ti, COLORES.adv
 function msgInfo(t, ti = null) { sendAnnouncement(`💡 ${t}`, ti, COLORES.info, "small", 0); }
 function msgGame(t, ti = null, c = COLORES.blanco, so = 1) { sendAnnouncement(`⚽ ${t}`, ti, c, "small", so); }
 function footerRanking() { return `📊 Sobre ${Object.keys(STATE.baseDatos).length} jugadores`; }
+
+function validarMonedas(player, cantidad, mensaje = "No tenés suficientes monedas") {
+    const s = STATE.baseDatos[getPlayerKey(player)];
+    if (!s || s.monedas < cantidad) {
+        msgError(`${mensaje} · Saldo actual: ${s.monedas}${EMOJIS.coins}`, player.id);
+        return false;
+    }
+    return true;
+}
 function validarCantidad(c, min = 0, max = Infinity) { return !isNaN(c) && c >= min && c <= max; }
     try { return op(); } catch (e) { logMsg('errors.log', `[${ROOM_ID}] SafeOp: ${e.message}`); return fb; }function limpiarCache() {
     const now = Date.now();
     for (const [k, ts] of STATE.caches.timestamps.entries()) if (now - ts > CONFIG.CACHE_TTL) { STATE.caches.titulos.delete(k); STATE.caches.badges.delete(k); STATE.caches.timestamps.delete(k); }
 }
+
+const playerKeyCache = new Map();
 function getPlayerKey(p) {
-    const a = STATE.authPorId.get(p.id); if (a) return a;
-    if (p.auth) return p.auth;
-    const c = STATE.connPorId.get(p.id); if (c) return `anon_conn_${c}`;
-    if (p.conn) return `anon_conn_${p.conn}`;
-    return `anon_${p.name.toLowerCase().trim().replace(/\s+/g, "_")}`;
+    const cacheKey = `${p.id}_${p.auth}_${p.conn}_${p.name}`;
+    if (playerKeyCache.has(cacheKey)) return playerKeyCache.get(cacheKey);
+
+    const a = STATE.authPorId.get(p.id);
+    if (a) { playerKeyCache.set(cacheKey, a); return a; }
+    if (p.auth) { playerKeyCache.set(cacheKey, p.auth); return p.auth; }
+    const c = STATE.connPorId.get(p.id);
+    if (c) { const key = `anon_conn_${c}`; playerKeyCache.set(cacheKey, key); return key; }
+    if (p.conn) { const key = `anon_conn_${p.conn}`; playerKeyCache.set(cacheKey, key); return key; }
+
+    const key = `anon_${p.name.toLowerCase().trim().replace(/\s+/g, "_")}`;
+    playerKeyCache.set(cacheKey, key);
+    return key;
 }
+
+// Limpiar cache cada 5 minutos
+setInterval(() => playerKeyCache.clear(), 300000);
+
+
 function esKeyAnonima(k) { return typeof k === "string" && k.startsWith("anon_"); }
 function esOwner(p) {
     if (CONFIG.OWNER_AUTH && p?.auth) return p.auth === CONFIG.OWNER_AUTH;
@@ -1275,28 +1318,36 @@ function checkFlood(player) {
     return false;
 }
 function checkAFK() {
-    if (!STATE.partidoEnCurso) return;
-    const now = Date.now();
+    const ahora = Date.now();
     STATE.room.getPlayerList().forEach(p => {
-        if (p.team === 0 || p.admin || !p.position) return;
-        const prev = STATE.playerPositions[p.id];
-        if (prev && prev.x === p.position.x && prev.y === p.position.y) {
-            if (!STATE.afkPlayers.has(p.id) && (now - (STATE.playerLastMove[p.id] || now)) > CONFIG.AFK_DETECT_MS) {
+        if (p.team === 0) return;
+
+        const lastMove = STATE.playerLastMove[p.id] || 0;
+        const lastPos = STATE.playerPositions[p.id];
+        const currentPos = p.position;
+
+        // 1. No se movió en 90 segundos
+        const afkPorTiempo = ahora - lastMove > 90000;
+
+        // 2. Mismas coordenadas (anti-AFK fake)
+        const afkPorPosicion = lastPos && currentPos &&
+            Math.abs(lastPos.x - currentPos.x) < 1 &&
+            Math.abs(lastPos.y - currentPos.y) < 1;
+
+        if (afkPorTiempo || afkPorPosicion) {
+            if (!STATE.afkPlayers.has(p.id)) {
                 STATE.afkPlayers.add(p.id);
-                STATE.afkDesde[p.id] = now;
-                msgSmall(`💤 ${p.name} está AFK`, null, 0xFF8800, "small", 1);
-                safeOperation(() => STATE.room.setPlayerTeam(p.id, 0));
-                STATE.afkCooldown.set(getPlayerKey(p), now + CONFIG.AFK_REINGRESO_COOLDOWN_MS);
-                STATE.ultimoToggleAfk[p.id] = now;
-                msgSmall(`Volvé en ${Math.round(CONFIG.AFK_KICK_MS / 1000)}s`, p.id, 0xFF8800, "small", 1);
+                STATE.afkDesde[p.id] = ahora;
+                msgSmall(`${EMOJIS.clock} ${p.name} está AFK`, null, COLORES.advertencia, "small", 1);
             }
-        } else {
-            STATE.afkPlayers.delete(p.id); delete STATE.afkDesde[p.id]; STATE.afkAvisado30s.delete(p.id);
-            STATE.playerPositions[p.id] = { x: p.position.x, y: p.position.y };
-            STATE.playerLastMove[p.id] = now;
+        } else if (STATE.afkPlayers.has(p.id)) {
+            STATE.afkPlayers.delete(p.id);
+            msgSmall(`${EMOJIS.success} ${p.name} volvió`, null, COLORES.exito, "small", 1);
         }
     });
 }
+
+
 function checkAFKKickAutomatico() {
     const ahora = Date.now();
     STATE.afkPlayers.forEach(id => {
@@ -2723,18 +2774,32 @@ function calcularPerformanceMultiplier({ goles = 0, asistencias = 0, atajadas = 
     return Math.max(CONFIG.ELO_PERF_MULT_MIN, (sc / 8) * Math.abs(CONFIG.ELO_PERF_MULT_MIN));
 }
 function calcularBonusRacha(r) { if (r >= 10) return CONFIG.ELO_RACHA_10; if (r >= 5) return CONFIG.ELO_RACHA_5; if (r >= 3) return CONFIG.ELO_RACHA_3; return 0; }
-function calcularCambioElo(eloJ, eloR, res, part, aj = 0, aband = false) {
-    const K = kFactorPara(part, eloJ);
-    const dif = Math.max(-400, Math.min(400, eloR - eloJ));
-    const exp = 1 / (1 + Math.pow(10, dif / 400));
-    const base = K * (res - exp);
-    const fac = base >= 0 ? (1 + aj) : (1 - aj);
-    let cam = Math.round(base * fac);
-    if (res === 1) cam = Math.max(CONFIG.ELO_CAMBIO_MIN_GANANDO, Math.min(CONFIG.ELO_CAMBIO_MAX, cam));
-    else if (res === 0) cam = Math.min(-CONFIG.ELO_CAMBIO_MIN_PERDIENDO, Math.max(-CONFIG.ELO_CAMBIO_MAX, cam));
-    else cam = Math.max(-Math.round(CONFIG.ELO_CAMBIO_MAX / 3), Math.min(Math.round(CONFIG.ELO_CAMBIO_MAX / 3), cam));
-    if (aband) cam -= CONFIG.ELO_PENALIZACION_ABANDONO;
-    return cam;
+function calcularCambioElo(eloJugador, eloRival, resultado, partidosJugados, ajustePerformance = 0, esAbandono = false) {
+    // 1. Factor K según experiencia
+    const factorK = kFactorPara(partidosJugados, eloJugador);
+
+    // 2. Diferencia de ELO (limitada)
+    const diferenciaElo = Math.max(-400, Math.min(400, eloRival - eloJugador));
+
+    // 3. Probabilidad esperada
+    const probabilidadEsperada = 1 / (1 + Math.pow(10, diferenciaElo / 400));
+
+    // 4. Cambio base
+    let cambio = factorK * (resultado - probabilidadEsperada);
+
+    // 5. Aplicar ajuste por performance
+    const multiplicador = cambio >= 0 ? (1 + ajustePerformance) : (1 - ajustePerformance);
+    cambio = Math.round(cambio * multiplicador);
+
+    // 6. Aplicar límites
+    if (resultado === 1) cambio = Math.max(CONFIG.ELO_CAMBIO_MIN_GANANDO, Math.min(CONFIG.ELO_CAMBIO_MAX, cambio)); // Victoria
+    else if (resultado === 0) cambio = Math.min(-CONFIG.ELO_CAMBIO_MIN_PERDIENDO, Math.max(-CONFIG.ELO_CAMBIO_MAX, cambio)); // Derrota
+    else cambio = Math.max(-Math.round(CONFIG.ELO_CAMBIO_MAX / 3), Math.min(Math.round(CONFIG.ELO_CAMBIO_MAX / 3), cambio)); // Empate
+
+    // 7. Penalización por abandono
+    if (esAbandono) cambio -= CONFIG.ELO_PENALIZACION_ABANDONO;
+
+    return cambio;
 }
 function aplicarCambioEloPartido(s, { eloRival, resultado, cambio, motivo }) {
     const ant = s.mmr;
@@ -2798,12 +2863,34 @@ function detectarYAnunciarRivalidad() {
     const { victorias, derrotas, empates } = me.h;
     sendAnnouncement(`⚔️ Rivalidad: ${me.pRojo.name} vs ${me.pAzul.name} — ${victorias}V ${derrotas}D${empates ? ` ${empates}E` : ""}`, null, COLORES.oro, "bold", 1);
 }
-function getFiguraDelPartido() {
+
+let figuraCache = null;
+function getFiguraDelPartido(forzar = false) {
+    if (!forzar && figuraCache && STATE.partidoEnCurso) {
+        return figuraCache;
+    }
+
     const ps = STATE.room.getPlayerList().filter(p => p.team !== 0);
-    let mx = -1, fg = null;
-    ps.forEach(p => { const s = STATE.matchStats[p.id] || { goles: 0, asistencias: 0 }; const pt = s.goles + s.asistencias * 0.7; if (pt > mx) { mx = pt; fg = p; } });
-    return fg;
+    let maxPuntos = -1;
+    let figura = null;
+
+    for (const p of ps) {
+        const s = STATE.matchStats[p.id] || { goles: 0, asistencias: 0 };
+        const puntos = (s.goles || 0) * 3 + (s.asistencias || 0) * 2 + (s.atajadas || 0) * 1.5;
+        if (puntos > maxPuntos) {
+            maxPuntos = puntos;
+            figura = { id: p.id, name: p.name, puntos };
+        }
+    }
+
+    figuraCache = figura;
+    return figura;
 }
+
+// Limpiar en onGameStop
+function limpiarFiguraCache() { figuraCache = null; }
+
+
 function otorgarMVP(player) {
     if (!player) return;
     const k = getPlayerKey(player), s = STATE.baseDatos[k]; if (!s) return;
@@ -3200,7 +3287,7 @@ function setupEvents() {
             const jugadoresEnEquipos = ps.filter(p => p.team === 1 || p.team === 2).length;
             if (!nat && jugadoresEnEquipos === 0) {
                 safeOperation(() => STATE.room.stopRecording());
-                msgSmall(`\ud83d\uded1 Partido detenido, sin cambios de ELO`, null, COLORES.error, "small-bold", 1);
+                msgSmall(`${EMOJIS.error} Partido cancelado · ELO no afectado`, null, COLORES.error, "small-bold", 1);
                 STATE.room.getPlayerList().forEach(p => { const k = getPlayerKey(p); if (STATE.baseDatos[k]) STATE.baseDatos[k].jugando = false; });
                 Object.values(STATE.apuestas).forEach(a => { const s = STATE.baseDatos[a.key]; if (s) s.monedas += a.cantidad; });
                 if (Object.keys(STATE.apuestas).length) msgInfo("Apuestas reembolsadas", null);

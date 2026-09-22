@@ -39,6 +39,30 @@
 const { Pool } = require("pg");
 const crypto = require("crypto");
 
+
+// ============================================
+// Logger unificado para database
+// ============================================
+const Logger = {
+    info: (msg) => Logger.info(`[DB] ${msg}`),
+    warn: (msg) => Logger.warn(`[DB] ⚠️ ${msg}`),
+    error: (msg, error = null) => {
+        const stack = error ? `\n${error.stack}` : '';
+        Logger.error(`[DB] ❌ ${msg}${stack}`);
+    },
+    debug: (msg) => {
+        if (process.env.DEBUG_MODE) Logger.info(`[DB] 🐛 ${msg}`);
+    }
+};
+
+// Reemplazar console por Logger
+const originalConsoleLog = console.log;
+const originalConsoleWarn = console.warn;
+const originalConsoleError = console.error;
+console.log = Logger.info;
+console.warn = Logger.warn;
+console.error = Logger.error;
+
 const CHUNK_SIZE = 500;
 const LEAGUE_STATE_ID = 1;
 
@@ -103,7 +127,7 @@ function buildPgConfig(overrides = {}) {
     const database = overrides.database || process.env.PGDATABASE || "haxball_league";
 
     if (!password) {
-        console.warn("⚠️ PGPASSWORD no está definida en el entorno. Las conexiones pueden fallar.");
+        Logger.warn("⚠️ PGPASSWORD no está definida en el entorno. Las conexiones pueden fallar.");
     }
 
     return {
@@ -135,14 +159,14 @@ function getPool(overrides = {}) {
     }
     if (!poolInstance) {
         const cfg = buildPgConfig(overrides);
-        console.log(`🔌 Creando pool de PostgreSQL (sala): ${cfg.user}@${cfg.host}:${cfg.port}/${cfg.database}`);
+        Logger.info(`🔌 Creando pool de PostgreSQL (sala): ${cfg.user}@${cfg.host}:${cfg.port}/${cfg.database}`);
 
         poolInstance = new Pool(cfg);
         poolInstance.on("error", (err) => {
             log.error("Error en pool de conexiones", err);
                 // Intentar reconectar después de 5 segundos
                 setTimeout(() => { poolInstance = null; getPool().connect().catch(() => {}); }, 5000);
-                console.error("❌ Error inesperado en el pool de PostgreSQL (sala):", err.message);
+                Logger.error("❌ Error inesperado en el pool de PostgreSQL (sala):", err.message);
         });
     }
     return poolInstance;
@@ -164,11 +188,11 @@ function getGlobalPool(overrides = {}) {
             database: process.env.PGDATABASE_GLOBAL || "haxball_global",
             ...overrides,
         });
-        console.log(`🔌 Creando pool de PostgreSQL (global): ${cfg.user}@${cfg.host}:${cfg.port}/${cfg.database}`);
+        Logger.info(`🔌 Creando pool de PostgreSQL (global): ${cfg.user}@${cfg.host}:${cfg.port}/${cfg.database}`);
 
         globalPoolInstance = new Pool(cfg);
         globalPoolInstance.on("error", (err) => {
-            console.error("❌ Error inesperado en el pool de PostgreSQL (global):", err.message);
+            Logger.error("❌ Error inesperado en el pool de PostgreSQL (global):", err.message);
         });
     }
     return globalPoolInstance;
@@ -455,7 +479,7 @@ async function loadDatabase(STATE, roomId = null) {
         for (const row of playerRows) lastSavedPlayers[row.key] = JSON.stringify(row.data);
         lastSavedLeague = snapshotLeague(STATE);
     } catch (e) {
-        console.error("❌ Error cargando la base de datos desde PostgreSQL:", e.message);
+        Logger.error("❌ Error cargando la base de datos desde PostgreSQL:", e.message);
         STATE.baseDatos = STATE.baseDatos || {};
         STATE.records = STATE.records || {};
         STATE.campeones = STATE.campeones || [];
@@ -555,12 +579,12 @@ async function loadDatabase(STATE, roomId = null) {
             const { rows: adminRows } = await gClient.query(`SELECT auth FROM admins_automaticos;`);
             STATE.adminsAutomaticos = new Set(adminRows.map(r => r.auth));
 
-            console.log(`✅ Postgres${roomId ? ` [${roomId}]` : ""}: ${playerRows.length} jugadores · ${banRows.length} baneos · ${globalRows.length} cuentas globales · ${nombreRows.length} nombres reservados · ${adminRows.length} admins automáticos (${jugadoresConAuth.length} nuevos)`);
+            Logger.info(`✅ Postgres${roomId ? ` [${roomId}]` : ""}: ${playerRows.length} jugadores · ${banRows.length} baneos · ${globalRows.length} cuentas globales · ${nombreRows.length} nombres reservados · ${adminRows.length} admins automáticos (${jugadoresConAuth.length} nuevos)`);
         } finally {
             gClient.release();
         }
     } catch (e) {
-        console.error("❌ Error cargando datos globales desde PostgreSQL:", e.message);
+        Logger.error("❌ Error cargando datos globales desde PostgreSQL:", e.message);
     }
 }
 
@@ -615,7 +639,7 @@ async function deletePlayerLocal(key) {
             client.release();
         }
     } catch (e) {
-        console.error("❌ Error borrando jugador de PostgreSQL (sala):", e.message);
+        Logger.error("❌ Error borrando jugador de PostgreSQL (sala):", e.message);
     }
 }
 
@@ -639,7 +663,7 @@ async function deletePlayersLocalBatch(keys) {
             client.release();
         }
     } catch (e) {
-        console.error("❌ Error borrando jugadores en batch de PostgreSQL (sala):", e.message);
+        Logger.error("❌ Error borrando jugadores en batch de PostgreSQL (sala):", e.message);
     }
 }
 
@@ -657,7 +681,7 @@ async function deletePlayerGlobalRow(key) {
             client.release();
         }
     } catch (e) {
-        console.error("❌ Error borrando jugador de PostgreSQL (global):", e.message);
+        Logger.error("❌ Error borrando jugador de PostgreSQL (global):", e.message);
     }
 }
 
@@ -834,7 +858,7 @@ async function saveDatabase(STATE, roomId = null) {
             lastSavedLeague = snapshotLeague(STATE);
         } catch (e) {
             await client.query("ROLLBACK").catch(() => {});
-            console.error("❌ Error guardando en PostgreSQL:", e.message);
+            Logger.error("❌ Error guardando en PostgreSQL:", e.message);
             STATE.isDirty = true;
             // Si el guardado falló a mitad de camino, las claves que se habían
             // tomado del set dirty (y ya se habían vaciado de STATE.dirtyPlayers)
@@ -932,10 +956,10 @@ async function backupDatabaseInterno(STATE, keep, roomId) {
             [keep]
         );
         await client.query("COMMIT");
-        console.log(`💾 Backup guardado en PostgreSQL${roomId ? ` [${roomId}]` : ""}.`);
+        Logger.info(`💾 Backup guardado en PostgreSQL${roomId ? ` [${roomId}]` : ""}.`);
     } catch (e) {
         await client.query("ROLLBACK").catch(() => {});
-        console.error("❌ Error creando backup en PostgreSQL:", e.message);
+        Logger.error("❌ Error creando backup en PostgreSQL:", e.message);
     } finally {
         client.release();
     }
@@ -964,7 +988,7 @@ async function reservarNombre(nombre, ownerKey, roomId = null) {
             client.release();
         }
     } catch (e) {
-        console.error("❌ Error reservando nombre en PostgreSQL:", e.message);
+        Logger.error("❌ Error reservando nombre en PostgreSQL:", e.message);
     }
 }
 
@@ -982,7 +1006,7 @@ async function liberarNombreReservado(nombre) {
             client.release();
         }
     } catch (e) {
-        console.error("❌ Error liberando nombre reservado en PostgreSQL:", e.message);
+        Logger.error("❌ Error liberando nombre reservado en PostgreSQL:", e.message);
     }
 }
 
@@ -1003,12 +1027,12 @@ async function liberarReservasHuerfanas(keysVivas) {
                 `DELETE FROM nombres_reservados WHERE owner_key != ALL($1::text[]);`,
                 [keysVivas]
             );
-            if (res.rowCount > 0) console.log(`🧹 ${res.rowCount} reservas de nombres huérfanas liberadas`);
+            if (res.rowCount > 0) Logger.info(`🧹 ${res.rowCount} reservas de nombres huérfanas liberadas`);
         } finally {
             client.release();
         }
     } catch (e) {
-        console.error("❌ Error liberando reservas huérfanas:", e.message);
+        Logger.error("❌ Error liberando reservas huérfanas:", e.message);
     }
 }
 
@@ -1062,7 +1086,7 @@ async function agregarAdminAuto(auth, agregadoPor, roomId = null) {
             client.release();
         }
     } catch (e) {
-        console.error("❌ Error agregando admin automático en PostgreSQL:", e.message);
+        Logger.error("❌ Error agregando admin automático en PostgreSQL:", e.message);
     }
 }
 
@@ -1076,7 +1100,7 @@ async function quitarAdminAuto(auth) {
             client.release();
         }
     } catch (e) {
-        console.error("❌ Error quitando admin automático en PostgreSQL:", e.message);
+        Logger.error("❌ Error quitando admin automático en PostgreSQL:", e.message);
     }
 }
 
@@ -1164,7 +1188,7 @@ async function upsertPlayerGlobals(key, fields, roomId = null) {
             client.release();
         }
     } catch (e) {
-        console.error("❌ Error guardando player_globals en PostgreSQL:", e.message);
+        Logger.error("❌ Error guardando player_globals en PostgreSQL:", e.message);
     }
 }
 
@@ -1212,7 +1236,7 @@ async function saveClanesGlobal(STATE, roomId = null) {
         lastSavedClanesGlobal = final;
     } catch (e) {
         await client.query("ROLLBACK").catch(() => {});
-        console.error("❌ Error sincronizando clanes globales:", e.message);
+        Logger.error("❌ Error sincronizando clanes globales:", e.message);
     } finally {
         client.release();
     }
@@ -1269,7 +1293,7 @@ async function upsertPlayerBan(key, { ban_hasta = 0, blacklisted = false } = {},
             client.release();
         }
     } catch (e) {
-        console.error("❌ Error guardando player_ban en PostgreSQL:", e.message);
+        Logger.error("❌ Error guardando player_ban en PostgreSQL:", e.message);
     }
 }
 
@@ -1305,7 +1329,7 @@ async function upsertPlayerBanParcial(key, campos, roomId = null) {
             client.release();
         }
     } catch (e) {
-        console.error("❌ Error guardando player_ban parcial en PostgreSQL:", e.message);
+        Logger.error("❌ Error guardando player_ban parcial en PostgreSQL:", e.message);
     }
 }
 
@@ -1328,7 +1352,7 @@ async function setBotState(key, value) {
             client.release();
         }
     } catch (e) {
-        console.error("❌ Error guardando bot_state:", e.message);
+        Logger.error("❌ Error guardando bot_state:", e.message);
     }
 }
 
@@ -1363,7 +1387,7 @@ async function closePool() {
 async function closeRoomPool() {
     if (poolClosing) return poolClosing;
     if (!poolInstance) {
-        console.log("⚠️ Pool de sala ya estaba cerrado o no existía.");
+        Logger.info("⚠️ Pool de sala ya estaba cerrado o no existía.");
         return;
     }
     const instanciaACerrar = poolInstance;
@@ -1371,9 +1395,9 @@ async function closeRoomPool() {
     poolClosing = (async () => {
         try {
             await instanciaACerrar.end();
-            console.log("🔒 Pool de PostgreSQL (sala) cerrado.");
+            Logger.info("🔒 Pool de PostgreSQL (sala) cerrado.");
         } catch (e) {
-            console.error("❌ Error cerrando el pool de PostgreSQL (sala):", e.message);
+            Logger.error("❌ Error cerrando el pool de PostgreSQL (sala):", e.message);
         }
     })();
     try {
@@ -1386,7 +1410,7 @@ async function closeRoomPool() {
 async function closeGlobalPool() {
     if (globalPoolClosing) return globalPoolClosing;
     if (!globalPoolInstance) {
-        console.log("⚠️ Pool global ya estaba cerrado o no existía.");
+        Logger.info("⚠️ Pool global ya estaba cerrado o no existía.");
         return;
     }
     const instanciaACerrar = globalPoolInstance;
@@ -1394,9 +1418,9 @@ async function closeGlobalPool() {
     globalPoolClosing = (async () => {
         try {
             await instanciaACerrar.end();
-            console.log("🔒 Pool de PostgreSQL (global) cerrado.");
+            Logger.info("🔒 Pool de PostgreSQL (global) cerrado.");
         } catch (e) {
-            console.error("❌ Error cerrando el pool de PostgreSQL (global):", e.message);
+            Logger.error("❌ Error cerrando el pool de PostgreSQL (global):", e.message);
         }
     })();
     try {
