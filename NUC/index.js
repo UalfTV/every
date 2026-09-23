@@ -1,3 +1,21 @@
+/**
+ * Bot de Haxball — Bahía Blanca Futsal
+ *
+ * Estructura general:
+ *   · CONFIG          — configuración estática (env vars + overrides por sala).
+ *   · STATE           — estado mutable del proceso. Los campos persistentes
+ *                       se marcan dirty y se sincronizan con Postgres cada
+ *                       15s vía saveDatabase().
+ *   · commands        — handlers de chat. Firma: (player, args, isAdmin).
+ *   · setupEvents()   — engancha los callbacks del room (onPlayerJoin, etc).
+ *   · El arranque está en la IIFE al final del archivo.
+ *
+ * Convenciones:
+ *   · key de jugador      → getPlayerKey(p): auth | anon_conn_X | anon_nombre.
+ *   · id de sesión        → player.id: cambia entre sesiones, NUNCA persistir.
+ *   · markDirty(key)      → marca un jugador para el próximo autosave.
+ *   · msgSmall/Box/Error… → helpers de sendAnnouncement (target=null = todos).
+ */
 require("dotenv").config({ path: process.env.ENV_FILE || ".env" });
 const HaxballJS = require("haxball.js").default;
 const fs = require("fs").promises;
@@ -7,14 +25,36 @@ const http = require("http");
 const https = require("https");
 
 const ROOM_CONFIG_FILE = process.env.ROOM_CONFIG_FILE || "./HA.config.js";
+
+// Rangos de staff, ordenados por jerarquía. Usar estas constantes en vez de
+// strings sueltos ("admin", "owner", etc.) evita typos que rompen permisos
+// silenciosamente.
+const RANGOS = Object.freeze({
+    NORMAL:  "normal",
+    MOD:     "mod",
+    MODPLUS: "modplus",
+    ADMIN:   "admin",
+    COOWNER: "coowner",
+    OWNER:   "owner",
+});
+const JERARQUIA_RANGOS = [RANGOS.NORMAL, RANGOS.MOD, RANGOS.MODPLUS, RANGOS.ADMIN, RANGOS.COOWNER, RANGOS.OWNER];
+
 const ROOM_CONFIG = require(ROOM_CONFIG_FILE);
 if (ROOM_CONFIG.PG_OVERRIDES && ROOM_CONFIG.PG_OVERRIDES.database) process.env.PGDATABASE = ROOM_CONFIG.PG_OVERRIDES.database;
+
+// ============================================
+// SISTEMAS CENTRALIZADOS — EMOJIS Y COLORES
+// ============================================
 
 const EMOJIS = {
     success: "\u2705", error: "\u274c", warning: "\u26a0\ufe0f", info: "\u2139\ufe0f",
     soccer: "\u26bd", goal: "\u26bd", trophy: "\ud83c\udfc6",
-    coins: "\ud83d\udcb0", money: "\ud83d\udcb5", shop: "\ud83d\udecd", gift: "${EMOJIS.coins}",
-    red: "\ud83d\udd34", blue: "\ud83d\udd35", vs: "${EMOJIS.vs}",
+    coins: "\ud83d\udcb0", money: "\ud83d\udcb5", shop: "\ud83d\udecd",
+    // QUALITY: antes gift y vs eran strings literales "${EMOJIS.coins}" y
+    // "${EMOJIS.vs}" (no template literals) → el emoji mostraba esa basura.
+    gift: "\ud83c\udf81",           // 🎁
+    red: "\ud83d\udd34", blue: "\ud83d\udd35",
+    vs: "\u2694\ufe0f",             // ⚔️
     fire: "\ud83d\udd25", star: "\u2605", sparkles: "\u2728", crown: "\ud83d\udc51",
     person: "\ud83d\udc64", people: "\ud83d\udc65", clock: "\u23f1\ufe0f",
     message: "\ud83d\udcac", megaphone: "\ud83d\udce3", checkered: "\ud83c\udf1f",
@@ -112,6 +152,9 @@ const CONFIG = {
     AFK_MIN_DURACION_MS: 10000,
     AFK_REINGRESO_COOLDOWN_MS: 20000,
     AFK_TOGGLE_COOLDOWN_MS: 10000,
+    // Umbral en unidades del mapa para considerar que "se movió". 0.5 px
+    // cubre el jitter del engine sin ignorar desplazamientos reales.
+    AFK_MOVIMIENTO_MIN_PX: 0.5,
 
     JUGAR_COOLDOWN_MS: 60000,
     MAX_APUESTA: 750, MAX_DUELO: 300, MAX_RULETA: 500, CUOTA_APUESTA: 1.9,
@@ -248,50 +291,87 @@ const TIPS_SALA = [
     "💡 Tu nombre queda tuyo para siempre.", "💡 !perfil te muestra tus stats.",
     "💡 Ganá un 1 vs 3 y te llevás un logro secreto.", "💡 Gastá las monedas en !tienda",
 ];
+// Frases de gol: un emoji al frente, exclamación simple, sentence case.
 const FRASES_GOL_TITULOS = [
-    `${EMOJIS.soccer} ${EMOJIS.sparkles} GOOOL!`, `${EMOJIS.soccer} ${EMOJIS.fire} GOLAZO!`, "🥅 ¡A LA RED!", "🎯 ¡DEFINICIÓN PERFECTA!", "💥 ¡MISIL AL ARCO!",
-    "🚀 ¡IMPOSIBLE PARA EL ARQUERO!", "🔥 ¡QUÉ GOL!", "🌟 ¡BRILLANTE DEFINICIÓN!", "🎉 ¡SE ABRE EL MARCADOR!",
-    "⚡ ¡NO PERDONÓ!", "💣 ¡BOMBAZO!", "🎊 ¡EL ESTADIO EXPLOTA!", "🏆 ¡OTRO MÁS PARA LA CUENTA!", "📣 ¡GRÍTALO!",
-    "💫 ¡OBRA DE ARTE!", "🐐 ¡GRAN DEFINICIÓN!", "🧉 ¡GOLAZO DE CALIDAD!", "🔥 ¡QUÉ ZURDAZO!",
-    "🎆 ¡SE PRENDIÓ FUEGO LA CANCHA!", "🥶 ¡FRÍO, MUY FRÍO PARA EL ARQUERO!",
+    "⚽ ¡Gol!", "🔥 ¡Golazo!", "🥅 ¡A la red!", "🎯 ¡Definición perfecta!",
+    "💥 ¡Misil al arco!", "🚀 ¡Imposible para el arquero!", "⚡ ¡No perdonó!",
+    "💣 ¡Bombazo!", "🏆 ¡Otro más para la cuenta!", "📣 ¡Gritalo!",
+    "💫 ¡Obra de arte!", "🐐 ¡Gran definición!", "🧉 ¡Golazo de calidad!",
+    "🔥 ¡Qué zurdazo!", "🎆 ¡Se prendió fuego la cancha!", "🥶 ¡Frío, muy frío para el arquero!",
 ];
-const FRASES_ARRANQUE_PARTIDO = ["🏟️ Comienza el partido", `${EMOJIS.soccer} Kickoff`, "🏁 Arrancamos", "🎬 Rodando la pelota", "🔥 En marcha"];
+// Sin emoji: el caller (onGameStart) agrega "⚽ " al frente y concatena
+// " · Temporada S{n}".
+const FRASES_ARRANQUE_PARTIDO = ["Comienza el partido", "Kickoff", "Arrancamos", "Rodando la pelota", "En marcha"];
 const MAPAS_BASE = { entrenamiento: `{"name":"Entrenamiento","width":865,"height":450,"bg":{"type":"grass","color":"434343"},"vertexes":[{"x":-417,"y":-225,"bCoef":0.5},{"x":417,"y":-225,"bCoef":0.5},{"x":417,"y":225,"bCoef":0.5},{"x":-417,"y":225,"bCoef":0.5}],"segments":[{"v0":0,"v1":1,"color":"555555"},{"v0":1,"v1":2,"color":"555555"},{"v0":2,"v1":3,"color":"555555"},{"v0":3,"v1":0,"color":"555555"}],"goals":[{"p0":[-417,-70],"p1":[-417,70],"team":"red"},{"p0":[417,-70],"p1":[417,70],"team":"blue"}]}` };
 const MAPAS = { ...MAPAS_BASE, ...require("./mapas") };
 
+// ── STATE: todo declarado acá, agrupado por dominio ──
 const STATE = {
-    room: null, baseDatos: {}, records: {}, campeones: [], clanes: {}, authRegistrados: {}, TEMPORADA_ACTUAL: 1,
+    // Sala / proceso
+    room: null, BOT_ID: 0, inicioSala: 0, roomLink: null,
+    progEcoInterval: null, afkCheckInterval: null,
+
+    // Partido actual
     partidoEnCurso: false, inicioPartido: 0, ultimoMarcadorConocido: null,
-    matchStats: {}, toquesRecientes: [], liveStatsMessageId: null, liveStatsTimer: null, historialTimer: null,
-    powershotActivado: false, powershotID: 0, powershotTrigger: false, powershotCounter: 0, powershotChargeStartTime: null,
-    powershotKickLockId: null, powershotKickLockTs: 0,
-    curvaActivado: false, curvaEnCurso: null,
-    festejosVipActivos: {}, salidasVoluntarias: new Set(), powershotBallDefaults: null,
-    rainbowEquipoActivo: null,
-    jueganTodosActivo: false, maxPlayersPerTeam: 2, automatizadoActivado: CONFIG.AUTOMATED_MODE_DEFAULT,
-    configuracionActual: null, bracketFijo: null, limitesCancha: null, cambioMapaPendiente: null,
-    verificacionesPendientes: {}, votaciones: { expulsar: null, kick30: null, mute30: null }, votos: { expulsar: {}, kick30: {}, mute30: {} }, votacionTokenSeq: 0,
-    afkPlayers: new Set(), playerPositions: {}, playerLastMove: {}, afkDesde: {}, afkAvisado30s: new Set(),
-    afkCooldown: new Map(),
-    ultimoToggleAfk: {},
-    ultimoJugar: {},
-    mutesTemporales: [], bansTemporales: [], mensajesRecientes: {},
-    apuestas: {}, duelosActivos: [], reportes: [], ultimoLlamadoAdmin: 0, titulosExclusivos: {},
-    blackjackActivo: {}, fairPlayActivo: true, ganaSigueActivo: false, golDeOroActivo: false,
+    matchStats: {}, toquesRecientes: [], peorDesventaja: { 1: 0, 2: 0 },
     equipoRojoPosesion: 0, equipoAzulPosesion: 0,
-    ArqueroRED: null, ArqueroBLUE: null, anuncioIndex: 0, anuncioDiscordIndex: 0, isDirty: false,
-    dirtyPlayers: new Set(), fullDiffPendiente: false,
-    caches: { titulos: new Map(), badges: new Map(), timestamps: new Map() },
-    clanInvitaciones: {}, gkReservado: { 1: null, 2: null }, gkUltimoWarn: {},
-    zonaArcoDesde: {}, zonaArcoUltimoAviso: {}, capitanes: { 1: null, 2: null },
-    nombresReservados: new Map(), adminsAutomaticos: new Set(), abandonos: new Map(),
-    authPorId: new Map(), connPorId: new Map(), radioJugadorCache: new Map(), rivalidadDelPartido: null,
-    animacionGolTokenPorId: new Map(), animacionGolActiva: new Set(), animacionGolIntervalos: new Map(),
-    BOT_ID: 0, tiroPeligroso: null, eventoGolX2Activo: false, eventoTimer: null,
-    vipBallColorTimeout: null, colorPelotaDefault: null, tipIndex: -1, cooldownsCmd: new Map(),
+    ArqueroRED: null, ArqueroBLUE: null, capitanes: { 1: null, 2: null },
+    ultimasCamisetas: null, rivalidadDelPartido: null,
+    configuracionActual: null, limitesCancha: null, cambioMapaPendiente: null,
     ultimoEquipoInicial: 1,
-    siguienteIdPermanente: 1,
-    authIntentos: {},
+
+    // Persistencia / diff
+    baseDatos: {}, records: {}, campeones: [], clanes: {}, authRegistrados: {},
+    TEMPORADA_ACTUAL: 1, siguienteIdPermanente: 1,
+    isDirty: false, dirtyPlayers: new Set(), fullDiffPendiente: false,
+
+    // Powershot / curva / pelota
+    powershotActivado: false, powershotID: 0, powershotTrigger: false,
+    powershotCounter: 0, powershotChargeStartTime: null,
+    powershotKickLockId: null, powershotKickLockTs: 0,
+    powershotBallDefaults: null,
+    curvaActivado: false, curvaEnCurso: null,
+    colorPelotaDefault: null, vipBallTrailActivo: false,
+    vipBallTrailTick: 0, vipBallTrailTier: null,
+    vipBallColorTimeout: null,
+
+    // Festejos / rainbow
+    festejosVipActivos: {}, rainbowEquipoActivo: null,
+    animacionGolTokenPorId: new Map(), animacionGolActiva: new Set(),
+    animacionGolIntervalos: new Map(), animacionGolSeq: 0,
+
+    // AFK
+    afkPlayers: new Set(), playerPositions: {}, playerLastMove: {},
+    afkDesde: {}, afkAvisado30s: new Set(),
+    afkCooldown: new Map(), ultimoToggleAfk: {}, ultimoJugar: {},
+
+    // Moderación
+    mutesTemporales: [], bansTemporales: [], mensajesRecientes: {},
+    votaciones: { expulsar: null, kick30: null, mute30: null },
+    votos:      { expulsar: {},   kick30: {},   mute30: {} },
+    votacionTokenSeq: 0,
+    reportes: [], ultimoLlamadoAdmin: 0, salidasVoluntarias: new Set(),
+    abandonos: new Map(), adminsAutomaticos: new Set(), authIntentos: {},
+
+    // Economía / juego
+    apuestas: {}, duelosActivos: [], blackjackActivo: {},
+    titulosExclusivos: {}, eventoGolX2Activo: false, eventoTimer: null,
+    fairPlayActivo: true, ganaSigueActivo: false, golDeOroActivo: false,
+    jueganTodosActivo: false, maxPlayersPerTeam: 2,
+    automatizadoActivado: CONFIG.AUTOMATED_MODE_DEFAULT, bracketFijo: null,
+
+    // Identidad / cachés
+    authPorId: new Map(), connPorId: new Map(), radioJugadorCache: new Map(),
+    nombresReservados: new Map(), clanInvitaciones: {},
+    gkReservado: { 1: null, 2: null }, gkUltimoWarn: {},
+    zonaArcoDesde: {}, zonaArcoUltimoAviso: {},
+    caches: { titulos: new Map(), badges: new Map(), timestamps: new Map() },
+
+    // Integraciones externas
+    liveStatsMessageId: null, liveStatsTimer: null, historialTimer: null,
+    verificacionesPendientes: {}, tiroPeligroso: null,
+    anuncioIndex: 0, anuncioDiscordIndex: 0, tipIndex: -1,
+    cooldownsCmd: new Map(),
 };
 
 const RETRY_QUEUE = [];
@@ -348,22 +428,33 @@ function mantenerPelotaEnCancha(ballPosition) {
     if (STATE.curvaEnCurso) finalizarCurva();
     logMsg('errors.log', `[${ROOM_ID}] Pelota fuera corregida en (${ballPosition.x.toFixed(0)}, ${ballPosition.y.toFixed(0)})`);
 }
-function msgBox(t, l, c = COLORES.blanco, s = "small", so = 2, ti = null) { sendAnnouncement([`${t}`, "─────────────", ...l].join("\n"), ti, c, s, so); }
+
+// ── Render único de cajas ──
+// Todas las cajas del bot usan la misma plantilla: header, filete del ancho
+// exacto del contenido, líneas, pie. msgBox queda con sonido 2 (notification),
+// msgCaja con sonido 1 (silencioso).
 function anchoVisual(t) { let a = 0; for (const ch of Array.from(t)) a += ch.codePointAt(0) >= 0x1100 ? 2 : 1; return a; }
-function msgCaja(t, l, c = COLORES.blanco, s = "small-bold", so = 1, ti = null) {
-    const am = Math.max(anchoVisual(t), ...l.map(anchoVisual));
+function _renderBox(t, lineas) {
+    const am = Math.max(anchoVisual(t), ...lineas.map(anchoVisual));
     const ab = Math.min(64, Math.max(20, am));
     const B = "─".repeat(ab);
-    sendAnnouncement([`┌${B}┐`, t, `├${B}┤`, ...l, `└${B}┘`].join("\n"), ti, c, s, so);
+    return [`┌${B}┐`, t, `├${B}┤`, ...lineas, `└${B}┘`].join("\n");
 }
+function msgBox(t, l, c = COLORES.blanco, s = "small-bold", so = 2, ti = null) { sendAnnouncement(_renderBox(t, l), ti, c, s, so); }
+function msgCaja(t, l, c = COLORES.blanco, s = "small-bold", so = 1, ti = null) { sendAnnouncement(_renderBox(t, l), ti, c, s, so); }
+
+// ── Familia de feedback corto ──
+// Cada prefijo identifica un rol distinto:
+//   ❌ error · ✅ éxito · ⚠️ advertencia · 💡 info · ⚽ evento de juego · ✦ neutro.
 function msgSmall(t, ti = null, c = COLORES.blanco, s = "small", so = 0) { sendAnnouncement(`✦ ${t}`, ti, c, s, so); }
 function msgMini(t, ti = null, c = COLORES.blanco, so = 0) { sendAnnouncement(t, ti, c, "small", so); }
 function msgArrow(t, l, ti = null, c = COLORES.blanco, so = 1) { sendAnnouncement(`${t}\n   ╰→ ${l}`, ti, c, "small-bold", so); }
 function anunciarGol(t, team, gn, an, vk, sc, fl = null) {
     const mt = sc ? `${sc.red}-${sc.blue}` : "";
     const tt = sc ? `[${formatTime(sc.time)}] ` : "";
-    const d = [an ? `asistió ${an}` : null, vk !== null ? `${vk.toFixed(0)} km/h` : null, fl].filter(Boolean).join(" · ");
-    const ls = [`${tt}${t} ${gn} · ${mt}`]; if (d) ls.push(`↳ ${d}`);
+    const d = [an ? `asistió ${an}` : null, vk !== null ? `${vk.toFixed(0)} km/h` : null, fl].filter(Boolean).join("  ·  ");
+    const ls = [`${tt}${t} — ${gn}  ${mt}`.trim()];
+    if (d) ls.push(`   ${d}`);
     sendAnnouncement(ls.join("\n"), null, team === 1 ? COLORES.equipo_rojo : COLORES.equipo_azul, "bold", 2);
 }
 function msgError(t, ti = null) { sendAnnouncement(`❌ ${t}`, ti, COLORES.error, "small", 0); }
@@ -376,11 +467,17 @@ function footerRanking() { return `📊 Sobre ${Object.keys(STATE.baseDatos).len
 function safeOperation(op, fb = null) {
     try { return op(); } catch (e) { logMsg('errors.log', `[${ROOM_ID}] SafeOp: ${e.message}`); return fb; }
 }
+// Wrappers comunes: evitan repetir safeOperation(() => STATE.room.getX()) en
+// los hotspots del tick, onTeamGoal, onPlayerLeave y comandos calientes.
+function safeGetPlayer(id)  { return safeOperation(() => STATE.room?.getPlayer(id) ?? null); }
+function safeGetBallPos()   { return safeOperation(() => STATE.room?.getBallPosition() ?? null); }
+function safeGetBallProps() { return safeOperation(() => STATE.room?.getDiscProperties(0) ?? null); }
+function safeGetPlayers()   { return safeOperation(() => STATE.room?.getPlayerList() ?? [], []) || []; }
 
-function validarMonedas(player, cantidad, mensaje = "No tenés suficientes monedas") {
+function validarMonedas(player, cantidad, mensaje = "No tenés monedas suficientes") {
     const s = STATE.baseDatos[getPlayerKey(player)];
     if (!s || s.monedas < cantidad) {
-        msgError(`${mensaje} · Saldo actual: ${s?.monedas ?? 0}${EMOJIS.coins}`, player.id);
+        msgError(`${mensaje} · Saldo actual: ${s?.monedas ?? 0} ${EMOJIS.coins}`, player.id);
         return false;
     }
     return true;
@@ -425,7 +522,11 @@ function enCooldown(k, cmd) {
 function discordCBAbierto() { return Date.now() < DISCORD_CB.abiertoHasta; }
 function discordCBFallo() { DISCORD_CB.fallos++; if (DISCORD_CB.fallos >= DISCORD_CB.UMBRAL) { DISCORD_CB.abiertoHasta = Date.now() + DISCORD_CB.COOLDOWN_MS; DISCORD_CB.fallos = 0; logMsg('errors.log', `[${ROOM_ID}] CB Discord abierto ${DISCORD_CB.COOLDOWN_MS/1000}s`); } }
 function discordCBExito() { DISCORD_CB.fallos = 0; }
-function auditLog(actor, accion, target, detalles = "") { logMsg('audit.log', `[${ROOM_ID}] ${actor?.name || "?"} → ${accion} → ${target || "—"}${detalles ? ` (${detalles})` : ""}`); }
+// Formato pipe-separated para facilitar grep/parseo de audit.log.
+function auditLog(actor, accion, target, detalles = "") {
+    const sep = " | ";
+    logMsg('audit.log', `[${ROOM_ID}]${sep}${actor?.name || "?"}${sep}${accion}${sep}${target || "—"}${detalles ? sep + detalles : ""}`);
+}
 
 async function pollGlobalSync() {
     try {
@@ -457,8 +558,7 @@ async function pollGlobalesJugadores() {
             let c = false;
             const br = r.badges || [];
             if (br.some(b => !l.badges?.includes(b))) { l.badges = Array.from(new Set([...(l.badges || []), ...br])); c = true; }
-            const vv = !!r.vip && (!r.vip_expira || Date.now() < Number(r.vip_expira));
-            if (vv && !l.vip) { l.vip = true; c = true; }
+            if (esVipActivo(r) && !l.vip) { l.vip = true; c = true; }
             if (r.vip_tortu && !l.vip_tortu) { l.vip_tortu = true; c = true; }
             if (r.vip_perma && !l.vip_perma) { l.vip_perma = true; c = true; }
             const ve = Number(r.vip_expira) || 0;
@@ -498,6 +598,26 @@ function resolverJugadorYResto(args) {
     return { target: null, key: null, resto: args };
 }
 function tierVipDe(s) { return CONFIG.VIP_TIERS[s?.vip_tier] || CONFIG.VIP_TIERS.vip; }
+// Un VIP "activo" es: vip=true Y (perma O expira en el futuro). Unificar
+// acá evita que un fix en un lugar se olvide en los otros dos.
+function esVipActivo(s) {
+    if (!s?.vip) return false;
+    if (s.vip_perma) return true;
+    return !s.vip_expira || Date.now() < Number(s.vip_expira);
+}
+// Chequea y desactiva VIPs vencidos. Se llama cada 60s sin depender de que
+// haya partido en curso (fix #6).
+function revisarVipExpirados() {
+    if (!STATE.room) return;
+    for (const pl of STATE.room.getPlayerList()) {
+        const k = getPlayerKey(pl);
+        const s = STATE.baseDatos[k];
+        if (!s?.vip || esVipActivo(s)) continue;
+        s.vip = false; s.vip_expira = null; s.vip_tier = "vip";
+        markDirty(k);
+        msgSmall("⌛ Tu VIP expiró", pl.id, COLORES.advertencia, "small", 0);
+    }
+}
 function pointDistance(a, b) { return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2); }
 function interpolarColorHex(ini, fin, prog) {
     const p = Math.max(0, Math.min(1, prog));
@@ -613,7 +733,7 @@ function actualizarRachaDiaria(player, s) {
     if (s.streak_dias === 7 && !s.badges.includes("streak_7")) darBadge(player, "streak_7");
     if (s.streak_dias === 30 && !s.badges.includes("streak_30")) darBadge(player, "streak_30");
     markDirty(k);
-    return `📅🔥 Racha ${s.streak_dias} día(s) — +${b}💰`;
+    return `📅🔥 Racha ${s.streak_dias} día(s) — +${b} 💰`;
 }
 function actualizarMisionDiaria(s) { const h = getDiaString(Date.now()); if (!s.misiones || s.misiones.fecha !== h) s.misiones = { fecha: h, goles: 0, partidos: 0, completadas: [] }; }
 function verificarMisionDiaria(player, s, g) {
@@ -621,7 +741,7 @@ function verificarMisionDiaria(player, s, g) {
     if (s.misiones.goles >= CONFIG.MISION_GOLES_OBJETIVO && !s.misiones.completadas.includes("goles_dia")) {
         s.misiones.completadas.push("goles_dia"); s.monedas += CONFIG.MISION_RECOMPENSA_MONEDAS;
         darXP(player, CONFIG.MISION_RECOMPENSA_XP);
-        msgSmall(`🎯 Misión del día · +${CONFIG.MISION_RECOMPENSA_MONEDAS}💰 +${CONFIG.MISION_RECOMPENSA_XP}XP`, player.id, COLORES.oro, "small-bold", 1);
+        msgSmall(`🎯 Misión del día · +${CONFIG.MISION_RECOMPENSA_MONEDAS} 💰  +${CONFIG.MISION_RECOMPENSA_XP} XP`, player.id, COLORES.oro, "small-bold", 1);
     }
     markDirty(getPlayerKey(player));
 }
@@ -636,27 +756,26 @@ function verificarMisionSemanal(player, s) {
     if (s.misionSemanal.partidos >= CONFIG.MISION_SEMANAL_PARTIDOS_OBJETIVO && !s.misionSemanal.completada) {
         s.misionSemanal.completada = true; s.monedas += CONFIG.MISION_SEMANAL_RECOMPENSA_MONEDAS;
         darXP(player, CONFIG.MISION_SEMANAL_RECOMPENSA_XP);
-        msgSmall(`🗓️🏅 Semana redonda +${CONFIG.MISION_SEMANAL_RECOMPENSA_MONEDAS}💰`, player.id, COLORES.oro, "small-bold", 1);
+        msgSmall(`🗓️🏅 Semana redonda · +${CONFIG.MISION_SEMANAL_RECOMPENSA_MONEDAS} 💰`, player.id, COLORES.oro, "small-bold", 1);
     }
     markDirty(getPlayerKey(player));
 }
-const JERARQUIA_RANGOS = ["normal", "mod", "modplus", "admin", "coowner", "owner"];
 const PERMISOS_MOD = {
     mod: ["!vetar", "!vetamin", "!desvetar", "!callar", "!hablar", "!advertir"],
     modplus: ["!vetar", "!vetamin", "!desvetar", "!callar", "!hablar", "!advertir"],
     admin: ["!vetar", "!vetamin", "!desvetar", "!callar", "!hablar", "!advertir", "!desadv", "!listaneg"],
     coowner: ["!vetar", "!vetamin", "!desvetar", "!callar", "!hablar", "!advertir", "!desadv", "!listaneg", "!quitveto"],
 };
-function getRango(p) { if (esOwner(p)) return "owner"; return STATE.baseDatos[getPlayerKey(p)]?.rango || "normal"; }
-function puedeUsar(p, cmd) { const r = getRango(p); if (r === "owner") return true; return (PERMISOS_MOD[r] || []).includes(cmd); }
-function esStaff(p) { return getRango(p) !== "normal"; }
-function esAdminEfectivo(p, isA) { if (isA) return true; return ["admin", "coowner", "owner"].includes(getRango(p)); }
+function getRango(p) { if (esOwner(p)) return RANGOS.OWNER; return STATE.baseDatos[getPlayerKey(p)]?.rango || RANGOS.NORMAL; }
+function puedeUsar(p, cmd) { const r = getRango(p); if (r === RANGOS.OWNER) return true; return (PERMISOS_MOD[r] || []).includes(cmd); }
+function esStaff(p) { return getRango(p) !== RANGOS.NORMAL; }
+function esAdminEfectivo(p, isA) { if (isA) return true; return [RANGOS.ADMIN, RANGOS.COOWNER, RANGOS.OWNER].includes(getRango(p)); }
 function esProtegidoDeVoto(p) { if (esStaff(p)) return true; return !!STATE.baseDatos[getPlayerKey(p)]?.vip; }
 function rangoDeKey(k) {
-    const s = STATE.baseDatos[k]; if (!s) return "normal";
-    if (CONFIG.OWNER_AUTH && s.auth === CONFIG.OWNER_AUTH) return "owner";
-    if (s.nombre_actual && s.nombre_actual.trim().toLowerCase() === CONFIG.OWNER_NAME.toLowerCase()) return "owner";
-    return s.rango || "normal";
+    const s = STATE.baseDatos[k]; if (!s) return RANGOS.NORMAL;
+    if (CONFIG.OWNER_AUTH && s.auth === CONFIG.OWNER_AUTH) return RANGOS.OWNER;
+    if (s.nombre_actual && s.nombre_actual.trim().toLowerCase() === CONFIG.OWNER_NAME.toLowerCase()) return RANGOS.OWNER;
+    return s.rango || RANGOS.NORMAL;
 }
 function actorSuperaKey(actor, tk) { if (esOwner(actor)) return true; return JERARQUIA_RANGOS.indexOf(getRango(actor)) > JERARQUIA_RANGOS.indexOf(rangoDeKey(tk)); }
 
@@ -716,7 +835,7 @@ function embedHistorial() {
     return construirEmbed({
         title: `📚 Historial — Sala ${ROOM_ID}`, description: "Estadísticas acumuladas", color: 0x9B59B6,
         fields: [
-            { name: "🧑‍🤝‍🧑 Registrados", value: String(j.length), inline: true },
+            { name: "🧑 Registrados", value: String(j.length), inline: true },
             { name: "🎮 Partidos", value: String(STATE.records.partidosTotalesLiga || 0), inline: true },
             { name: "⚽ Goles", value: String(j.reduce((a, s) => a + (s.goles || 0), 0)), inline: true },
             { name: "🎯 Asistencias", value: String(j.reduce((a, s) => a + (s.asistencias || 0), 0)), inline: true },
@@ -729,7 +848,7 @@ function formatUptime(ms) { const s = Math.floor(ms / 1000), h = Math.floor(s / 
 function barraProgreso(a, m, l = 10) { const p = m > 0 ? Math.min(1, a / m) : 0; const ll = Math.round(p * l); return "●".repeat(ll) + "○".repeat(Math.max(0, l - ll)); }
 function listaNombresJugadores(js, mx = 8) { if (!js.length) return "_Nadie conectado todavía_"; const ns = js.map(p => `\`${p.name}\``); return ns.length <= mx ? ns.join(", ") : `${ns.slice(0, mx).join(", ")} y ${ns.length - mx} más`; }
 function embedEstadoSala() {
-    const js = safeOperation(() => STATE.room.getPlayerList(), []) || [];
+    const js = safeGetPlayers();
     const enSala = js.filter(p => p.id !== 0);
     const sc = STATE.partidoEnCurso ? STATE.ultimoMarcadorConocido : null;
     let est, col;
@@ -748,7 +867,7 @@ function embedEstadoSala() {
             { name: "⏱️ Uptime", value: formatUptime(Date.now() - STATE.inicioSala), inline: true },
             { name: "⚽ Marcador", value: marc, inline: true },
             { name: "🎛️ Modo", value: modo, inline: true },
-            { name: "🧑‍🤝‍🧑 En la sala", value: listaNombresJugadores(enSala), inline: false },
+            { name: "🧑 En la sala", value: listaNombresJugadores(enSala), inline: false },
         ], footer: "🏆 Bahía Blanca Futsal",
     });
 }
@@ -776,11 +895,13 @@ function darBadgePorKey(k, bid, nm, ti = null) {
     const s = STATE.baseDatos[k]; if (!s || s.badges.includes(bid)) return;
     s.badges.push(bid); invalidarCache("badges", k);
     const nl = BADGE_NOMBRES[bid] || bid.replace(/_/g, " ");
-    const txt = ti ? `🏅✨ ¡Nuevo logro! ${BADGES[bid] || "🏆"} ${nl}` : `🏅✨ ${nm} desbloqueó ${BADGES[bid] || "🏆"} ${nl}`;
+    const txt = ti ? `🏅 Nuevo logro: ${BADGES[bid] || "🏆"} ${nl}` : `🏅 ${nm} desbloqueó ${BADGES[bid] || "🏆"} ${nl}`;
     msgSmall(txt, ti, COLORES.oro, "small-bold", 1);
     markDirty(k);
 }
-function darBadge(p, bid) { if (!p) return; darBadgePorKey(p.key || getPlayerKey(p), bid, p.name, p.id); }
+// `p.key` no existe en ningún player de Haxball — siempre resolvemos vía
+// getPlayerKey(p).
+function darBadge(p, bid) { if (!p) return; darBadgePorKey(getPlayerKey(p), bid, p.name, p.id); }
 const CAMPOS_RANKING = { elo: "mmr", goles: "goles", asistencias: "asistencias", victorias: "victorias", partidos: "partidos", atajadas: "atajadas" };
 async function obtenerRankingDesdeDB(cat, lim) {
     const c = CAMPOS_RANKING[cat] || "mmr";
@@ -801,7 +922,7 @@ function confirmarVerificacionDiscord(cod, dId = null, dTag = null) {
     s.monedas += CONFIG.VERIFICACION_RECOMPENSA_MONEDAS;
     if (!s.badges.includes("fair_play") && s.fair_play >= 90) darBadgePorKey(p.key, "fair_play", s.nombre_actual);
     markDirty(p.key);
-    if (STATE.room?.getPlayer(p.playerId)) msgBox(`✅ ¡DISCORD VERIFICADO!`, [`+${CONFIG.VERIFICACION_RECOMPENSA_MONEDAS}💰`], COLORES.exito, "small-bold", 2, p.playerId);
+    if (STATE.room?.getPlayer(p.playerId)) msgBox(`✅ Discord verificado`, [`+${CONFIG.VERIFICACION_RECOMPENSA_MONEDAS} 💰`], COLORES.exito, "small-bold", 2, p.playerId);
     notificarMensaje(`✅ **${p.nombre}** verificó Discord`);
     return true;
 }
@@ -865,7 +986,7 @@ function ejecutarAccionAdmin(accion, payload) {
     switch (accion) {
         case "reiniciar": {
             // FIX #13: el ternario devolvía "Reiniciado" en ambas ramas y h no
-            // se usaba. Ahora el mensaje diferencia los dos casos.
+            // se usaba. Ahora diferencia los dos casos.
             const h = STATE.partidoEnCurso;
             STATE.room.stopGame();
             setTimeout(() => { if (STATE.room && !STATE.partidoEnCurso) STATE.room.startGame(); }, 1000);
@@ -937,8 +1058,8 @@ function _handlePowerShotInterno(playerList, bpc, bprc) {
     const players = (playerList || STATE.room.getPlayerList()).filter(p => p.id !== STATE.BOT_ID);
     if (STATE.powershotID !== 0 && !players.some(pl => pl.id === STATE.powershotID)) cancelarPowershotCarga();
     if (!STATE.powershotActivado || !STATE.partidoEnCurso) return;
-    const bP = bpc || safeOperation(() => STATE.room.getBallPosition()); if (!bP) return;
-    const bR = bprc || safeOperation(() => STATE.room.getDiscProperties(0)); if (!bR) return;
+    const bP = bpc || safeGetBallPos(); if (!bP) return;
+    const bR = bprc || safeGetBallProps(); if (!bR) return;
     const bRad = bR.radius || 10;
     const cL = bRad + CONFIG.TAMANO_MAX + 0.01 + CONFIG.POWERSHOT_CANCEL_DISTANCE + 5;
     let hv = false, ht = false;
@@ -1041,7 +1162,7 @@ function aplicarComba(bp, bpr, playerList) {
         return null;
     }
     if (c.ticksRestantes <= 0) { finalizarCurva(); return null; }
-    const props = bpr || safeOperation(() => STATE.room.getDiscProperties(0));
+    const props = bpr || safeGetBallProps();
     if (!props) { finalizarCurva(); return null; }
     const sp = Math.sqrt(props.xspeed ** 2 + props.yspeed ** 2);
     if (sp <= 0.5) { finalizarCurva(); return null; }
@@ -1071,7 +1192,7 @@ function aplicarComba(bp, bpr, playerList) {
     return propsN;
 }
 function limitarVelocidadPelota(pc) {
-    const p = pc || safeOperation(() => STATE.room.getDiscProperties(0)); if (!p) return;
+    const p = pc || safeGetBallProps(); if (!p) return;
     const s = Math.sqrt(p.xspeed ** 2 + p.yspeed ** 2);
     if (s > CONFIG.BALL_MAX_SPEED && s > 0) { const f = CONFIG.BALL_MAX_SPEED / s; safeOperation(() => STATE.room.setDiscProperties(0, { xspeed: p.xspeed * f, yspeed: p.yspeed * f })); }
 }
@@ -1084,7 +1205,7 @@ function handlePowerShotKick(player) {
         const k = getPlayerKey(player), s = STATE.baseDatos[k];
         if (s) { s.powershots_exitosos = (s.powershots_exitosos || 0) + 1; if (s.powershots_exitosos >= 5 && !s.badges.includes("powershot_king")) darBadge(player, "powershot_king"); markDirty(k); }
         if (STATE.curvaActivado) {
-            const bp = safeOperation(() => STATE.room.getDiscProperties(0));
+            const bp = safeGetBallProps();
             let dir = 1;
             if (bp) {
                 const sp = Math.sqrt(bp.xspeed ** 2 + bp.yspeed ** 2);
@@ -1192,34 +1313,31 @@ function manejarRainbowEquipo(ballPos) {
 
 function iniciarVotacion(tipo, target, votante) {
     const ps = STATE.room.getPlayerList();
-    if (ps.length < CONFIG.MIN_PLAYERS_VOTE) return msgError(`Se necesitan ${CONFIG.MIN_PLAYERS_VOTE}+ jugadores`, votante.id);
-    if (STATE.votaciones[tipo]) return msgError(`Ya hay votación activa`, votante.id);
+    if (ps.length < CONFIG.MIN_PLAYERS_VOTE) return msgError(`Se necesitan al menos ${CONFIG.MIN_PLAYERS_VOTE} jugadores.`, votante.id);
+    if (STATE.votaciones[tipo]) return msgError(`Ya hay una votación en curso.`, votante.id);
     const pp = Math.ceil(ps.length * CONFIG.PORCENTAJE_VOTOS / 100);
     const needed = (tipo === "kick30" || tipo === "mute30") ? Math.max(pp, Math.min(CONFIG.VOTEKICK_MIN_VOTOS, ps.length)) : pp;
     const token = ++STATE.votacionTokenSeq;
     STATE.votaciones[tipo] = { target, inicio: Date.now(), needed, token };
     STATE.votos[tipo] = { [votante.id]: true };
     const em = { expulsar: "🚷", kick30: "🚷", mute30: "🤫" }[tipo] || "🗳️";
-    sendAnnouncement(`${em} VOTACIÓN: ${target.name}\n!votar ${tipo} (${needed} votos)`, null, COLORES.advertencia, "small-bold", 2);
+    sendAnnouncement(`${em} Votación: ${target.name}\n   !votar ${tipo}  (${needed} votos)`, null, COLORES.advertencia, "small-bold", 2);
     setTimeout(() => { if (STATE.votaciones[tipo]?.token === token) { STATE.votaciones[tipo] = null; STATE.votos[tipo] = {}; msgSmall(`❌ Votación cancelada`, null, COLORES.error, "small-bold", 1); } }, CONFIG.COOLDOWN_VOTE);
 }
 function votar(tipo, votante) {
-    if (!STATE.votaciones[tipo]) return msgError("No hay votación", votante.id);
-    if (STATE.votos[tipo][votante.id]) return msgError("Ya votaste", votante.id);
+    if (!STATE.votaciones[tipo]) return msgError("No hay votación.", votante.id);
+    if (STATE.votos[tipo][votante.id]) return msgError("Ya votaste en esta votación.", votante.id);
     STATE.votos[tipo][votante.id] = true;
     const n = STATE.votaciones[tipo].needed, v = Object.keys(STATE.votos[tipo]).length;
-    msgSmall(`🗳️ ${votante.name} votó (${v}/${n})`, null, COLORES.advertencia, "small-bold", 1);
+    msgSmall(`🗳️ ${votante.name} votó  (${v}/${n})`, null, COLORES.advertencia, "small-bold", 1);
     if (v >= n) {
         const t = STATE.votaciones[tipo].target;
         // FIX #15: si el target ya no está en la sala, no intentar kickearlo.
-        // Sin esto, kickPlayer sobre un id inexistente puede tirar excepción
-        // y dejar STATE.votaciones[tipo] sin limpiar (porque el throw corta
-        // antes de llegar al reset de abajo).
         const sigueEnSala = t && STATE.room.getPlayerList().some(pl => pl.id === t.id);
         if (sigueEnSala) {
-            if (tipo === "expulsar") { STATE.room.kickPlayer(t.id, "Expulsado", false); msgBox(`🚷 ¡EXPULSADO!`, [`${t.name}`], COLORES.error, "small-bold", 2); }
-            else if (tipo === "kick30") { const s = STATE.baseDatos[getPlayerKey(t)]; if (s) aplicarBanGlobal(getPlayerKey(t), CONFIG.VOTEKICK_DURACION_MS); STATE.room.kickPlayer(t.id, "🚷 Votekickeado (30 min)", false); msgBox(`🚷 ¡VOTEKICK!`, [`${t.name}`, `30 min`], COLORES.error, "small-bold", 2); }
-            else if (tipo === "mute30") { const k = getPlayerKey(t); STATE.mutesTemporales = STATE.mutesTemporales.filter(m => m.auth !== k); STATE.mutesTemporales.push({ auth: k, timestamp: Date.now(), duracion: CONFIG.VOTEMUTE_DURACION_MS }); msgBox(`🤫 ¡VOTEMUTE!`, [`${t.name}`, `30 min`], COLORES.advertencia, "small-bold", 2); }
+            if (tipo === "expulsar") { STATE.room.kickPlayer(t.id, "Expulsado", false); msgBox(`🚷 Expulsado`, [`${t.name}`], COLORES.error, "small-bold", 2); }
+            else if (tipo === "kick30") { const s = STATE.baseDatos[getPlayerKey(t)]; if (s) aplicarBanGlobal(getPlayerKey(t), CONFIG.VOTEKICK_DURACION_MS); STATE.room.kickPlayer(t.id, "🚷 Votekickeado (30 min)", false); msgBox(`🚷 Votekick`, [`${t.name}`, `30 min`], COLORES.error, "small-bold", 2); }
+            else if (tipo === "mute30") { const k = getPlayerKey(t); STATE.mutesTemporales = STATE.mutesTemporales.filter(m => m.auth !== k); STATE.mutesTemporales.push({ auth: k, timestamp: Date.now(), duracion: CONFIG.VOTEMUTE_DURACION_MS }); msgBox(`🤫 Votemute`, [`${t.name}`, `30 min`], COLORES.advertencia, "small-bold", 2); }
         } else {
             msgSmall(`❌ Votación resuelta — el jugador ya no está en la sala`, null, COLORES.error, "small-bold", 0);
         }
@@ -1239,10 +1357,8 @@ function checkFlood(player) {
     }
     return false;
 }
-// FIX #1/D: el chequeo de movimiento ahora depende de playerLastMove que se
-// inicializa al entrar/en cancha y se refresca en onGameTick SOLO cuando la
-// posición cambió. Antes cualquier jugador que no hubiera tocado !afk tenía
-// lastMove=0 y se lo marcaba AFK al instante (y se lo kickeaba a los 20s).
+// FIX #1/D: el chequeo depende de playerLastMove, inicializado al entrar/en
+// cancha y refrescado en onGameTick SÓLO cuando la posición cambió.
 function checkAFK() {
     const ahora = Date.now();
     STATE.room.getPlayerList().forEach(p => {
@@ -1252,8 +1368,8 @@ function checkAFK() {
         const currentPos = p.position;
         const afkPorTiempo = lastMove > 0 && (ahora - lastMove > 90000);
         const afkPorPosicion = lastPos && currentPos &&
-            Math.abs(lastPos.x - currentPos.x) < 1 &&
-            Math.abs(lastPos.y - currentPos.y) < 1;
+            Math.abs(lastPos.x - currentPos.x) < CONFIG.AFK_MOVIMIENTO_MIN_PX &&
+            Math.abs(lastPos.y - currentPos.y) < CONFIG.AFK_MOVIMIENTO_MIN_PX;
         if (afkPorTiempo || afkPorPosicion) {
             if (!STATE.afkPlayers.has(p.id)) {
                 STATE.afkPlayers.add(p.id);
@@ -1280,7 +1396,7 @@ function checkAFKKickAutomatico() {
 function kickAFKs(adminName) {
     let k = 0;
     STATE.afkPlayers.forEach(id => { const p = STATE.room.getPlayer(id); if (p && !p.admin) { STATE.room.kickPlayer(id, "AFK", false); k++; } delete STATE.afkDesde[id]; STATE.afkAvisado30s.delete(id); });
-    STATE.afkPlayers.clear(); msgBox(`🚷 AFKs Kickeados`, [`${k} jugadores`, `Por: ${adminName}`], COLORES.error, "small-bold", 2);
+    STATE.afkPlayers.clear(); msgBox(`🚷 AFKs expulsados`, [`${k} jugadores`, `Por: ${adminName}`], COLORES.error, "small-bold", 2);
 }
 function handleFairPlay(sc) {
     if (!STATE.fairPlayActivo) return;
@@ -1288,9 +1404,9 @@ function handleFairPlay(sc) {
     setTimeout(() => {
         if (STATE.partidoEnCurso) return;
         const ps = STATE.room.getPlayerList().filter(p => p.team !== 0);
-        if (d === 1) { ps.forEach(p => { if (p.team === 1) STATE.room.setPlayerTeam(p.id, 2); else if (p.team === 2) STATE.room.setPlayerTeam(p.id, 1); }); msgBox(`🔄 FairPlay`, [`Dif 1 gol`, `Intercambiados`], COLORES.exito, "small-bold", 0); }
-        else if (d === 2) { shuffleArray(ps).forEach((p, i) => STATE.room.setPlayerTeam(p.id, i % 2 === 0 ? 1 : 2)); msgBox(`🎲 FairPlay`, [`Dif 2`, `Mezclados`], COLORES.exito, "small-bold", 0); }
-        else if (d >= 3) { const { equipo1, equipo2 } = balancearEquiposElo(ps); equipo1.forEach(p => STATE.room.setPlayerTeam(p.id, 1)); equipo2.forEach(p => STATE.room.setPlayerTeam(p.id, 2)); msgBox(`⚖️ FairPlay`, [`Dif 3+`, `Rebalanceados`], COLORES.exito, "small-bold", 0); }
+        if (d === 1) { ps.forEach(p => { if (p.team === 1) STATE.room.setPlayerTeam(p.id, 2); else if (p.team === 2) STATE.room.setPlayerTeam(p.id, 1); }); msgBox(`🔄 Fair Play`, [`Diferencia: 1 gol`, `Equipos intercambiados`], COLORES.exito, "small-bold", 0); }
+        else if (d === 2) { shuffleArray(ps).forEach((p, i) => STATE.room.setPlayerTeam(p.id, i % 2 === 0 ? 1 : 2)); msgBox(`🎲 Fair Play`, [`Diferencia: 2 goles`, `Equipos reasignados`], COLORES.exito, "small-bold", 0); }
+        else if (d >= 3) { const { equipo1, equipo2 } = balancearEquiposElo(ps); equipo1.forEach(p => STATE.room.setPlayerTeam(p.id, 1)); equipo2.forEach(p => STATE.room.setPlayerTeam(p.id, 2)); msgBox(`⚖️ Fair Play`, [`Diferencia: 3+ goles`, `Equipos rebalanceados`], COLORES.exito, "small-bold", 0); }
     }, 2000);
 }
 function handleGanaSigue(gan) {
@@ -1300,7 +1416,7 @@ function handleGanaSigue(gan) {
         const per = gan === 1 ? 2 : 1;
         const specs = STATE.room.getPlayerList().filter(p => p.team === 0 && !STATE.afkPlayers.has(p.id));
         STATE.room.getPlayerList().filter(p => p.team === per).forEach(p => STATE.room.setPlayerTeam(p.id, 0));
-        if (specs.length >= 2) { specs.slice(0, 4).forEach((p, i) => STATE.room.setPlayerTeam(p.id, i % 2 === 0 ? per : gan)); msgBox(`⏭️ Gana Sigue`, [`Perdedores salen`], COLORES.advertencia, "small-bold", 0); }
+        if (specs.length >= 2) { specs.slice(0, 4).forEach((p, i) => STATE.room.setPlayerTeam(p.id, i % 2 === 0 ? per : gan)); msgBox(`⏭️ Gana y sigue`, [`Perdedores salen`], COLORES.advertencia, "small-bold", 0); }
     }, 3000);
 }
 function calcularVelocidadTiro() { try { const b = STATE.room.getDiscProperties(0); return (Math.sqrt((b.xspeed || 0) ** 2 + (b.yspeed || 0) ** 2) * 60 / CONFIG.VELOCIDAD_PX_POR_METRO) * 3.6; } catch (e) { return null; } }
@@ -1344,7 +1460,7 @@ function iniciarAchiqueGradual(pid, rD, iM, term, tk) {
 }
 function calcularPosesion() {
     const t = STATE.equipoRojoPosesion + STATE.equipoAzulPosesion;
-    if (t > 0) sendAnnouncement(`📊 Posesión: 🔴 ${((STATE.equipoRojoPosesion / t) * 100).toFixed(1)}% · ${((STATE.equipoAzulPosesion / t) * 100).toFixed(1)}% 🔵`, null, COLORES.info, "small-bold", 1);
+    if (t > 0) sendAnnouncement(`📊 Posesión: 🔴 ${((STATE.equipoRojoPosesion / t) * 100).toFixed(1)}%  ·  ${((STATE.equipoAzulPosesion / t) * 100).toFixed(1)}% 🔵`, null, COLORES.info, "small-bold", 1);
 }
 function detectArquero(pl) {
     const ts = pl || STATE.room.getPlayerList();
@@ -1429,11 +1545,11 @@ function completarEquiposAutomatico(sa, rA, aA, eS) {
 function programarEventoAleatorio() {
     if (STATE.eventoTimer) clearTimeout(STATE.eventoTimer);
     STATE.eventoTimer = setTimeout(() => {
-        if (STATE.partidoEnCurso && !STATE.eventoGolX2Activo) { STATE.eventoGolX2Activo = true; msgGame("🎲 El próximo gol vale x2 monedas", null, COLORES.oro, 2); }
+        if (STATE.partidoEnCurso && !STATE.eventoGolX2Activo) { STATE.eventoGolX2Activo = true; msgGame("El próximo gol vale x2 monedas.", null, COLORES.oro, 2); }
         programarEventoAleatorio();
     }, 240000 + Math.floor(Math.random() * 180000));
 }
-function anunciarModoAutomatizado() { if (!CONFIG.AUTOMATED_MODE_ANNOUNCE || !STATE.room) return; sendAnnouncement("⚙️ Modo auto: mapas y equipos se arman solos", null, COLORES.info, "small", 0); }
+function anunciarModoAutomatizado() { if (!CONFIG.AUTOMATED_MODE_ANNOUNCE || !STATE.room) return; sendAnnouncement("⚙️ Modo auto: mapas y equipos se arman solos.", null, COLORES.info, "small", 0); }
 function ejecutarAutomatizado(f) { if (!STATE.automatizadoActivado) return; try { _ejecutarAutomatizadoInterno(f); } catch (e) { logMsg('errors.log', `[${ROOM_ID}] Error auto: ${e.message}`); } }
 function _ejecutarAutomatizadoInterno(forzarMezcla) {
     STATE.jueganTodosActivo = true; STATE.fairPlayActivo = false;
@@ -1554,7 +1670,7 @@ function asegurarCapitan(t, { anunciar = false } = {}) {
     const n = elegirCapitanEquipo(t); if (!n) return null;
     STATE.capitanes[t] = n.id;
     marcarCapitan(n.id, true);
-    if (anunciar) msgSmall(`${CONFIG.CAPITAN_AVATAR} ${n.name} capitán del ${t === 1 ? "rojo 🔴" : "azul 🔵"}`, null, t === 1 ? 0xFF3366 : 0x00BFFF, "small-bold", 0);
+    if (anunciar) msgSmall(`${CONFIG.CAPITAN_AVATAR} ${n.name} es capitán del ${t === 1 ? "rojo 🔴" : "azul 🔵"}`, null, t === 1 ? 0xFF3366 : 0x00BFFF, "small-bold", 0);
     return n;
 }
 function asignarCapitanes() { limpiarCapitanes(); const r = asegurarCapitan(1), a = asegurarCapitan(2); const p = []; if (r) p.push(`🔴 ${r.name}`); if (a) p.push(`🔵 ${a.name}`); if (p.length) msgSmall(`${CONFIG.CAPITAN_AVATAR} Capitanes — ${p.join("  vs  ")}`, null, COLORES.oro, "small-bold", 1); }
@@ -1584,7 +1700,7 @@ function initStats(p) {
                 boost_xp_activo: false, escudo_mmr_activo: false, festejo_fuego_activo: false, clan: null,
                 historial_vs: {}, favoritos: [], rivales: [], streak_dias: 0, ultimo_login: null,
                 duelos_ganados: 0, duelos_perdidos: 0, vallas_invictas: 0, atajadas: 0, apuestas_realizadas: 0,
-                vip: false, rango: "normal", vip_tortu: false, vip_perma: false, vip_expira: null, vip_tier: "vip",
+                vip: false, rango: RANGOS.NORMAL, vip_tortu: false, vip_perma: false, vip_expira: null, vip_tier: "vip",
                 warns_hoy: 0, warns_fecha: null, ban_hasta: 0, blacklisted: false, msg_join: null, msg_leave: null,
                 discord_verificado: false, discord_id: null, discord_tag: null, segundos_jugados: 0, tamano_personalizado: CONFIG.TAMANO_DEFAULT
             };
@@ -1592,7 +1708,7 @@ function initStats(p) {
         }
     }
     const s = STATE.baseDatos[k];
-    if (s.rango === undefined) s.rango = "normal";
+    if (s.rango === undefined) s.rango = RANGOS.NORMAL;
     if (s.vip_tortu === undefined) s.vip_tortu = false;
     if (s.vip_perma === undefined) s.vip_perma = false;
     if (s.vip_expira === undefined) s.vip_expira = null;
@@ -1631,21 +1747,21 @@ function resolverBlackjack(player, porExp = false) {
     let mC = [...m.manoCasa], tC = mC.reduce((a, b) => a + b, 0);
     while (tC < 17) { mC.push(cart()); tC = mC.reduce((a, b) => a + b, 0); }
     let res, pre = 0;
-    if (tC > 21) { pre = m.cantidad * 2; res = `La casa se pasó (${tC}). Vos ${tJ}. ¡Ganaste ${pre}💰!`; }
-    else if (tJ > tC) { pre = m.cantidad * 2; res = `Vos ${tJ} vs Casa ${tC}. ¡Ganaste ${pre}💰!`; }
+    if (tC > 21) { pre = m.cantidad * 2; res = `La casa se pasó (${tC}). Vos ${tJ}. Ganaste ${pre} 💰.`; }
+    else if (tJ > tC) { pre = m.cantidad * 2; res = `Vos ${tJ} vs Casa ${tC}. Ganaste ${pre} 💰.`; }
     else if (tJ === tC) { pre = m.cantidad; res = `Empate. Recuperás tu apuesta.`; }
-    else res = `Vos ${tJ} vs Casa ${tC}. Perdiste ${m.cantidad}💰`;
+    else res = `Vos ${tJ} vs Casa ${tC}. Perdiste ${m.cantidad} 💰.`;
     if (pre > 0) s.monedas += pre;
     markDirty(m.key);
-    msgBox(`🃏 BLACKJACK`, [`${porExp ? "⌛ Auto-plantaste\n" : ""}Cartas casa: ${mC.join(" + ")}`, res], pre > m.cantidad ? 0x00FF88 : (pre === m.cantidad ? 0xFFD700 : 0xFF3366), "small-bold", 1, player.id);
+    msgBox(`🃏 Blackjack`, [`${porExp ? "⌛ Auto-plantaste.\n" : ""}Cartas casa: ${mC.join(" + ")}`, res], pre > m.cantidad ? 0x00FF88 : (pre === m.cantidad ? 0xFFD700 : 0xFF3366), "small-bold", 1, player.id);
 }
 function dejarArquero(p) {
     const era = STATE.gkReservado[1] === p.id || STATE.gkReservado[2] === p.id;
-    if (!era) return msgError("No sos arquero reservado", p.id);
+    if (!era) return msgError("No sos arquero reservado.", p.id);
     if (STATE.gkReservado[1] === p.id) STATE.gkReservado[1] = null;
     if (STATE.gkReservado[2] === p.id) STATE.gkReservado[2] = null;
     aplicarTamanoPersistente(p);
-    msgMini(`${p.name} colgó los guantes`, p.id, COLORES.info, 0);
+    msgSmall(`${p.name} dejó de ser arquero`, null, COLORES.info, "small", 1);
 }
 function aplicarBanGlobal(key, ms) {
     const s = STATE.baseDatos[key]; if (!s) return;
@@ -1669,7 +1785,7 @@ function modificarFairPlay(player, cantidad, razon) {
     const k = getPlayerKey(player);
     const s = STATE.baseDatos[k]; if (!s) return;
     s.fair_play = Math.max(0, Math.min(100, s.fair_play + cantidad));
-    if (cantidad < 0) msgWarn(`${player.name}: ${cantidad} FP (${razon}). Total: ${s.fair_play}/100`, null);
+    if (cantidad < 0) msgWarn(`${player.name}: ${cantidad} FP (${razon}). Total: ${s.fair_play}/100.`, null);
     if (s.fair_play >= 90 && !s.badges.includes("fair_play")) darBadge(player, "fair_play");
     markDirty(k);
 }
@@ -1678,11 +1794,11 @@ const commands = {
     "!clave": (p, args) => {
         const key = getPlayerKey(p);
         const b = STATE.authIntentos?.[key], ahora = Date.now();
-        if (b && b.hasta > ahora) { const r = Math.ceil((b.hasta - ahora) / 1000); return msgError(`Demasiados intentos. Probá en ${r}s`, p.id); }
+        if (b && b.hasta > ahora) { const r = Math.ceil((b.hasta - ahora) / 1000); return msgError(`Demasiados intentos. Probá en ${r}s.`, p.id); }
         if (args[0] === CONFIG.ADMIN_PASSWORD) {
             delete STATE.authIntentos[key];
             STATE.room.setPlayerAdmin(p.id, true);
-            msgBox("👑 Ahora sos admin", [`${p.name} es admin`], COLORES.oro, "small-bold", 2, p.id);
+            msgBox("👑 Ahora sos admin", [`${p.name} recibió admin`], COLORES.oro, "small-bold", 2, p.id);
             logMsg('auth.log', `[${ROOM_ID}] Login OK: ${p.name} (${key})`);
             auditLog(p, "LOGIN_ADMIN_OK", p.name);
         } else {
@@ -1690,17 +1806,17 @@ const commands = {
             i.fallos++;
             if (i.fallos >= 5) { i.hasta = ahora + 300000; i.fallos = 0; }
             STATE.authIntentos[key] = i;
-            msgError("Contraseña incorrecta", p.id);
+            msgError("Contraseña incorrecta.", p.id);
             logMsg('auth.log', `[${ROOM_ID}] Login FALLIDO: ${p.name} (${key})`);
         }
     },
     "!jugar": (p) => {
-        if (STATE.partidoEnCurso && !STATE.jueganTodosActivo && !STATE.automatizadoActivado) return msgWarn("Partido en curso", p.id);
+        if (STATE.partidoEnCurso && !STATE.jueganTodosActivo && !STATE.automatizadoActivado) return msgWarn("Hay un partido en curso. Esperá a que termine.", p.id);
         const ahora = Date.now();
         const cdAfk = STATE.afkCooldown.get(getPlayerKey(p));
-        if (cdAfk && ahora < cdAfk) { const r = Math.ceil((cdAfk - ahora) / 1000); return msgError(`Saliste de AFK hace poco, esperá ${r}s`, p.id); }
+        if (cdAfk && ahora < cdAfk) { const r = Math.ceil((cdAfk - ahora) / 1000); return msgError(`Saliste de AFK hace poco. Esperá ${r}s.`, p.id); }
         const ult = STATE.ultimoJugar[p.id];
-        if (ult && ahora - ult < CONFIG.JUGAR_COOLDOWN_MS) { const r = Math.ceil((CONFIG.JUGAR_COOLDOWN_MS - (ahora - ult)) / 1000); return msgError(`Esperá ${r}s`, p.id); }
+        if (ult && ahora - ult < CONFIG.JUGAR_COOLDOWN_MS) { const r = Math.ceil((CONFIG.JUGAR_COOLDOWN_MS - (ahora - ult)) / 1000); return msgError(`Esperá ${r}s antes de volver a entrar.`, p.id); }
         STATE.ultimoJugar[p.id] = ahora;
         const r = STATE.room.getPlayerList().filter(x => x.team === 1).length;
         const b = STATE.room.getPlayerList().filter(x => x.team === 2).length;
@@ -1708,178 +1824,191 @@ const commands = {
         STATE.playerLastMove[p.id] = ahora;
         if (p.position) STATE.playerPositions[p.id] = { x: p.position.x, y: p.position.y };
         setTimeout(() => aplicarTamanoPersistente(p), 100);
-        msgSuccess(`${p.name} entró a la cancha!`, p.id);
+        msgSuccess(`${p.name} entró a la cancha.`, p.id);
     },
-    "!ver": (p) => { STATE.room.setPlayerTeam(p.id, 0); msgSmall(`👀 ${p.name} a suplentes`, p.id, COLORES.advertencia, "small", 1); },
+    "!ver": (p) => { STATE.room.setPlayerTeam(p.id, 0); msgSmall(`👀 ${p.name} pasa a suplentes`, p.id, COLORES.advertencia, "small", 1); },
     "!tiempo": (p) => {
-        if (!STATE.partidoEnCurso || !STATE.ultimoMarcadorConocido) return msgError("Sin partido activo", p.id);
+        if (!STATE.partidoEnCurso || !STATE.ultimoMarcadorConocido) return msgError("No hay partido en curso.", p.id);
         const t = Math.max(0, (STATE.ultimoMarcadorConocido.timeLimit * 60) - STATE.ultimoMarcadorConocido.time);
-        sendAnnouncement(`⏱️ ${formatTime(t)} · ${STATE.ultimoMarcadorConocido.red}-${STATE.ultimoMarcadorConocido.blue}`, p.id, COLORES.info, "small-bold", 0);
+        sendAnnouncement(`⏱️ ${formatTime(t)}  ·  ${STATE.ultimoMarcadorConocido.red}-${STATE.ultimoMarcadorConocido.blue}`, p.id, COLORES.info, "small-bold", 0);
     },
     "!equipos": (p) => {
         const ps = STATE.room.getPlayerList();
-        sendAnnouncement(`🔴 ROJO: ${ps.filter(x => x.team === 1).map(x => x.name).join(", ") || "Vacío"}\n🔵 AZUL: ${ps.filter(x => x.team === 2).map(x => x.name).join(", ") || "Vacío"}\n👀 SPEC: ${ps.filter(x => x.team === 0).map(x => x.name).join(", ") || "Vacío"}`, p.id, 0xFFFFFF, "small-bold", 0);
+        sendAnnouncement(`🔴 Rojo: ${ps.filter(x => x.team === 1).map(x => x.name).join(", ") || "Vacío"}\n🔵 Azul: ${ps.filter(x => x.team === 2).map(x => x.name).join(", ") || "Vacío"}\n👀 Spec: ${ps.filter(x => x.team === 0).map(x => x.name).join(", ") || "Vacío"}`, p.id, 0xFFFFFF, "small-bold", 0);
     },
     "!vivo": (p) => {
-        if (!STATE.partidoEnCurso) return msgError("Sin partido", p.id);
+        if (!STATE.partidoEnCurso) return msgError("No hay partido.", p.id);
         const t = STATE.room.getPlayerList().filter(x => x.team !== 0).map(pl => { const ms = STATE.matchStats[pl.id] || { goles: 0, asistencias: 0 }; return `${pl.team === 1 ? "🔴" : "🔵"} ${pl.name}: ${ms.goles}G ${ms.asistencias}A`; }).join("\n");
-        sendAnnouncement(`📊 STATS EN VIVO:\n${t || "Sin stats"}`, p.id, COLORES.info, "small-bold", 0);
+        sendAnnouncement(`📊 Estadísticas en vivo\n${t || "Sin stats"}`, p.id, COLORES.info, "small-bold", 0);
     },
     "!perfil": (p, args) => {
         let target = p, key = getPlayerKey(p);
-        if (args.length) { const r = resolverJugadorYResto(args); if (!r.key) return msgError("No encontré a ese jugador", p.id); target = r.target; key = r.key; }
-        const s = STATE.baseDatos[key]; if (!s) return msgError("Perfil no encontrado", p.id);
+        if (args.length) { const r = resolverJugadorYResto(args); if (!r.key) return msgError("No encontré a ese jugador.", p.id); target = r.target; key = r.key; }
+        const s = STATE.baseDatos[key]; if (!s) return msgError("Perfil no encontrado.", p.id);
         const t = obtenerTituloPorKey(key), b = obtenerBadgesPorKey(key);
         const wr = s.partidos > 0 ? Math.round((s.victorias / s.partidos) * 100) : 0;
         const n = target ? target.name : s.nombre_actual;
         const ver = s.discord_verificado ? " 🔗" : "";
         const sig = getSiguienteRango(s.titulo || "bronce1");
-        const prog = sig ? `próximo: ${sig.nombre} (faltan ${Math.max(0, sig.req - s.mmr)} ELO)` : "rango máximo";
-        msgCaja(`👤 ${n}${ver} · ${formatTituloDisplay(t)} ${b}`, [
-            `🆔 ${s.id_permanente ?? "?"}`,
-            `📊 ELO ${s.mmr} (Nv ${s.nivel}) · ${s.victorias}V-${s.derrotas}D-${s.empates}E (${wr}%)`,
-            `↳ ${prog}`,
-            `⚽ Goles ${s.goles} · 🎁 Asistencias ${s.asistencias} · 🌟 MVPs ${s.mvps || 0}`,
-            `💰 ${s.monedas} · 🔥 Racha ${s.racha} (mejor ${s.mejor_racha || 0}) · 🎮 ${s.partidos} partidos`,
-        ], t.color, "small", 0, p.id);
+        const prog = sig
+            ? `Próximo rango: ${sig.nombre} — faltan ${Math.max(0, sig.req - s.mmr)} ELO`
+            : "Rango máximo alcanzado";
+        msgCaja(
+            `👤 ${n}${ver} · ${formatTituloDisplay(t)} ${b}`.trim(),
+            [
+                `ID #${s.id_permanente ?? "?"}   ·   Temporada S${STATE.TEMPORADA_ACTUAL}`,
+                `ELO ${s.mmr}   ·   Nivel ${s.nivel}   ·   ${s.victorias}V / ${s.derrotas}D / ${s.empates}E   (${wr}%)`,
+                prog,
+                `⚽ ${s.goles} goles   ·   🎁 ${s.asistencias} asistencias   ·   🌟 ${s.mvps || 0} MVPs`,
+                `💰 ${s.monedas} monedas   ·   🔥 racha ${s.racha} (mejor ${s.mejor_racha || 0})   ·   🎮 ${s.partidos} partidos`,
+            ],
+            t.color, "small-bold", 0, p.id
+        );
     },
     "!rango": (p) => {
         const s = STATE.baseDatos[getPlayerKey(p)], t = obtenerTitulo(p);
         const sig = getSiguienteRango(s.titulo || "bronce1");
-        const prog = sig ? ` · faltan ${Math.max(0, sig.req - s.mmr)} ELO para ${sig.nombre}` : " · rango máximo";
-        sendAnnouncement(`${formatTituloDisplay(t)} • ${p.name} · ELO ${s.mmr} · Nv ${s.nivel}${prog}`, p.id, t.color, "small", 0);
+        const prog = sig ? `  ·  faltan ${Math.max(0, sig.req - s.mmr)} ELO para ${sig.nombre}` : "  ·  rango máximo";
+        sendAnnouncement(`${formatTituloDisplay(t)}  •  ${p.name}  ·  ELO ${s.mmr}  ·  Nivel ${s.nivel}${prog}`, p.id, t.color, "small", 0);
     },
     "!vs": (p, args) => {
-        if (!args.length) return msgError("Uso: !vs [jugador]", p.id);
+        if (!args.length) return msgError("Uso: !vs [jugador].", p.id);
         const { target } = resolverJugadorYResto(args);
-        if (!target) return msgError("No encontré a ese jugador conectado", p.id);
-        if (target.id === p.id) return msgError("No podés compararte con vos mismo", p.id);
+        if (!target) return msgError("No encontré a ese jugador conectado.", p.id);
+        if (target.id === p.id) return msgError("No podés compararte con vos mismo.", p.id);
         const s = STATE.baseDatos[getPlayerKey(p)];
         const h = s.historial_vs?.[getPlayerKey(target)];
-        if (!h || (h.victorias + h.derrotas + h.empates) === 0) return msgInfo(`Todavía no jugaste contra ${target.name}`, p.id);
+        if (!h || (h.victorias + h.derrotas + h.empates) === 0) return msgInfo(`Todavía no jugaste contra ${target.name}.`, p.id);
         const tot = h.victorias + h.derrotas + h.empates;
-        sendAnnouncement(`⚔️ ${p.name} VS ${target.name}\n🟢 ${h.victorias}V 🔴 ${h.derrotas}D ⚪ ${h.empates}E (${tot}, ${Math.round((h.victorias / tot) * 100)}%)`, p.id, COLORES.advertencia, "small", 0);
+        sendAnnouncement(`⚔️ ${p.name} vs ${target.name}\n🟢 ${h.victorias}V  🔴 ${h.derrotas}D  ⚪ ${h.empates}E  (${tot}, ${Math.round((h.victorias / tot) * 100)}%)`, p.id, COLORES.advertencia, "small", 0);
     },
     // FIX #3: filtrar jugadores con partidos > 0 como el resto de los tops.
     "!tabla": (p) => {
-        const top = Object.values(STATE.baseDatos).filter(s => (s.partidos || 0) > 0).sort((a, b) => b.mmr - a.mmr).slice(0, 5).map((s, i) => `${i + 1}. ${getTituloSeguro(s.titulo).nombre} ${s.nombre_actual} - ${s.mmr}`);
+        const top = Object.values(STATE.baseDatos).filter(s => (s.partidos || 0) > 0).sort((a, b) => b.mmr - a.mmr).slice(0, 5).map((s, i) => `${i + 1}. ${getTituloSeguro(s.titulo).nombre} ${s.nombre_actual}  ·  ${s.mmr}`);
         top.push(footerRanking());
-        msgCaja(`🏆 Top 5 · Temporada ${STATE.TEMPORADA_ACTUAL}`, top, COLORES.oro, "small", 0, p.id);
+        msgCaja(`🏆 Top 5  ·  Temporada S${STATE.TEMPORADA_ACTUAL}`, top, COLORES.oro, "small-bold", 0, p.id);
     },
-    "!goles": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.goles > 0).sort((a, b) => b.goles - a.goles).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual} — ⚽ ${s.goles}`); msgBox(`${EMOJIS.soccer} TOP GOLEADORES`, t.length ? [...t, footerRanking()] : ["Nadie metió goles"], COLORES.oro, "small", 0, p.id); },
-    "!asist": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.asistencias > 0).sort((a, b) => b.asistencias - a.asistencias).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual} — 🎯 ${s.asistencias}`); msgBox("🎯 TOP ASISTIDORES", t.length ? [...t, footerRanking()] : ["Sin asistencias"], COLORES.info, "small", 0, p.id); },
-    "!figuras": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.mvps > 0).sort((a, b) => b.mvps - a.mvps).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual} — 🌟 ${s.mvps}`); msgBox("🌟 TOP MVPS", t.length ? [...t, footerRanking()] : ["Nadie fue MVP"], COLORES.morado, "small", 0, p.id); },
-    "!partidos": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.partidos > 0).sort((a, b) => b.partidos - a.partidos).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual} — 🎮 ${s.partidos}`); msgBox("🎮 TOP PARTIDAS", t.length ? [...t, footerRanking()] : ["Sin partidos"], COLORES.exito, "small", 0, p.id); },
-    "!vallas": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.vallas_invictas > 0).sort((a, b) => b.vallas_invictas - a.vallas_invictas).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual} — 🧤 ${s.vallas_invictas}`); msgBox("🧤 VALLAS INVICTAS", t.length ? [...t, footerRanking()] : ["Sin vallas"], COLORES.azul, "small", 0, p.id); },
-    "!atajadas": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.atajadas > 0).sort((a, b) => b.atajadas - a.atajadas).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual} — 🧤✋ ${s.atajadas}`); msgBox("🧤✋ TOP ATAJADAS", t.length ? [...t, footerRanking()] : ["Sin atajadas"], COLORES.diamante, "small", 0, p.id); },
-    "!horas": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.segundos_jugados > 0).sort((a, b) => b.segundos_jugados - a.segundos_jugados).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual} — ⏳ ${formatTime(s.segundos_jugados)}`); msgBox(`${EMOJIS.clock} TOP TIEMPO`, t.length ? [...t, footerRanking()] : ["Sin datos"], COLORES.advertencia, "small", 0, p.id); },
-    "!monedas": (p) => { const t = Object.values(STATE.baseDatos).sort((a, b) => b.monedas - a.monedas).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual} — 💰 ${s.monedas}`); msgBox("💰 TOP MONEDAS", t.length ? [...t, footerRanking()] : ["Sin datos"], COLORES.oro, "small", 0, p.id); },
-    "!efec": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.partidos >= 3).sort((a, b) => (b.victorias / b.partidos) - (a.victorias / a.partidos)).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual} — 📊 ${Math.round((s.victorias / s.partidos) * 100)}% (${s.partidos} PJ)`); msgBox("📊 WINRATE (mín. 3)", t.length ? [...t, footerRanking()] : ["Nadie con 3 partidos"], COLORES.verde, "small", 0, p.id); },
+    "!goles": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.goles > 0).sort((a, b) => b.goles - a.goles).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual}  ·  ⚽ ${s.goles}`); msgBox(`⚽ Goleadores`, t.length ? [...t, footerRanking()] : ["Nadie metió goles todavía."], COLORES.oro, "small-bold", 0, p.id); },
+    "!asist": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.asistencias > 0).sort((a, b) => b.asistencias - a.asistencias).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual}  ·  🎯 ${s.asistencias}`); msgBox(`🎯 Asistidores`, t.length ? [...t, footerRanking()] : ["Sin asistencias todavía."], COLORES.info, "small-bold", 0, p.id); },
+    "!figuras": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.mvps > 0).sort((a, b) => b.mvps - a.mvps).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual}  ·  🌟 ${s.mvps}`); msgBox(`🌟 MVPs`, t.length ? [...t, footerRanking()] : ["Nadie fue MVP todavía."], COLORES.morado, "small-bold", 0, p.id); },
+    "!partidos": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.partidos > 0).sort((a, b) => b.partidos - a.partidos).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual}  ·  🎮 ${s.partidos}`); msgBox(`🎮 Partidos jugados`, t.length ? [...t, footerRanking()] : ["Sin partidos todavía."], COLORES.exito, "small-bold", 0, p.id); },
+    "!vallas": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.vallas_invictas > 0).sort((a, b) => b.vallas_invictas - a.vallas_invictas).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual}  ·  🧤 ${s.vallas_invictas}`); msgBox(`🧤 Vallas invictas`, t.length ? [...t, footerRanking()] : ["Sin vallas todavía."], COLORES.azul, "small-bold", 0, p.id); },
+    "!atajadas": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.atajadas > 0).sort((a, b) => b.atajadas - a.atajadas).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual}  ·  🧤 ${s.atajadas}`); msgBox(`🧤 Atajadas`, t.length ? [...t, footerRanking()] : ["Sin atajadas todavía."], COLORES.diamante, "small-bold", 0, p.id); },
+    "!horas": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.segundos_jugados > 0).sort((a, b) => b.segundos_jugados - a.segundos_jugados).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual}  ·  ⏱ ${formatTime(s.segundos_jugados)}`); msgBox(`⏱ Tiempo jugado`, t.length ? [...t, footerRanking()] : ["Sin datos todavía."], COLORES.advertencia, "small-bold", 0, p.id); },
+    "!monedas": (p) => { const t = Object.values(STATE.baseDatos).sort((a, b) => b.monedas - a.monedas).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual}  ·  💰 ${s.monedas}`); msgBox(`💰 Monedas`, t.length ? [...t, footerRanking()] : ["Sin datos todavía."], COLORES.oro, "small-bold", 0, p.id); },
+    "!efec": (p) => { const t = Object.values(STATE.baseDatos).filter(s => s.partidos >= 3).sort((a, b) => (b.victorias / b.partidos) - (a.victorias / a.partidos)).slice(0, 10).map((s, i) => `${i + 1}. ${s.nombre_actual}  ·  📊 ${Math.round((s.victorias / s.partidos) * 100)}%  (${s.partidos} PJ)`); msgBox(`📊 Winrate (mín. 3 partidos)`, t.length ? [...t, footerRanking()] : ["Nadie con 3 partidos todavía."], COLORES.verde, "small-bold", 0, p.id); },
     "!tienda": (p, args) => {
         const key = getPlayerKey(p), stats = STATE.baseDatos[key];
         if (args[0] === "exclusivo") {
-            const lista = Object.entries(TITULOS_EXCLUSIVOS).map(([id, t]) => { const dk = STATE.titulosExclusivos[id]; const d = dk ? (STATE.baseDatos[dk]?.nombre_actual || "??") : "nadie"; return `${t.nombre} — ${t.precio}💰 (dueño: ${d}) → !tienda comprar ${id}`; });
-            return msgCaja("👑 Títulos exclusivos", ["Sólo 1 persona puede tener cada uno", ...lista], COLORES.oro, "small", 0, p.id);
+            const lista = Object.entries(TITULOS_EXCLUSIVOS).map(([id, t]) => { const dk = STATE.titulosExclusivos[id]; const d = dk ? (STATE.baseDatos[dk]?.nombre_actual || "??") : "nadie"; return `${t.nombre}  ·  ${t.precio} 💰  (dueño: ${d})\n   !tienda comprar ${id}`; });
+            return msgCaja("👑 Títulos exclusivos", ["Sólo una persona puede tener cada uno.", ...lista], COLORES.oro, "small-bold", 0, p.id);
         }
         if (args[0] === "comprar" && args[1]) {
             const id = args[1].toLowerCase();
             if (TITULOS_EXCLUSIVOS[id]) {
                 const ex = TITULOS_EXCLUSIVOS[id];
-                if (STATE.titulosExclusivos[id] === key) return msgError("Ya sos vos el dueño", p.id);
-                if (stats.monedas < ex.precio) return msgError(`Te faltan ${ex.precio - stats.monedas}💰`, p.id);
+                if (STATE.titulosExclusivos[id] === key) return msgError("Ya sos el dueño de ese título.", p.id);
+                if (stats.monedas < ex.precio) return msgError(`Te faltan ${ex.precio - stats.monedas} 💰.`, p.id);
                 stats.monedas -= ex.precio;
                 const dk = STATE.titulosExclusivos[id];
                 if (dk && STATE.baseDatos[dk]) { STATE.baseDatos[dk].titulo_custom = null; invalidarCache("titulos", dk); }
                 stats.titulo_custom = ex.nombre; STATE.titulosExclusivos[id] = key; invalidarCache("titulos", key);
-                msgSmall(`👑 ${p.name} ahora es ${ex.nombre}`, p.id, ex.color, "small", 1);
+                msgSmall(`👑 ${p.name} ahora es ${ex.nombre}`, p.id, ex.color, "small-bold", 1);
                 auditLog(p, "BUY_TITLE", ex.nombre);
                 return markDirty(key);
             }
             const item = TIENDA_ITEMS[id];
-            if (!item) return msgError("Ese ítem no existe", p.id);
-            if (id === "escudo_mmr" && stats.escudo_mmr_activo) return msgError("Ya tenés Escudo activo", p.id);
-            if (id === "boost_xp" && stats.boost_xp_activo) return msgError("Ya tenés Boost activo", p.id);
-            if (id === "revivir_racha" && stats.racha >= stats.mejor_racha) return msgError("Tu racha actual es la mejor", p.id);
-            if (id === "titulo_custom" && args.length < 3) return msgError("Uso: !tienda comprar titulo_custom [texto]", p.id);
-            if (id === "festejo_fuego" && (stats.vip || stats.festejo_fuego_activo)) return msgError(stats.vip ? "Ya sos VIP" : "Ya tenés un Festejo pendiente", p.id);
-            if (stats.monedas < item.precio) return msgError(`Te faltan ${item.precio - stats.monedas}💰`, p.id);
+            if (!item) return msgError("Ese ítem no existe.", p.id);
+            if (id === "escudo_mmr" && stats.escudo_mmr_activo) return msgError("Ya tenés Escudo activo.", p.id);
+            if (id === "boost_xp" && stats.boost_xp_activo) return msgError("Ya tenés Boost activo.", p.id);
+            if (id === "revivir_racha" && stats.racha >= stats.mejor_racha) return msgError("Tu racha actual ya es la mejor.", p.id);
+            if (id === "titulo_custom" && args.length < 3) return msgError("Uso: !tienda comprar titulo_custom [texto].", p.id);
+            if (id === "festejo_fuego" && (stats.vip || stats.festejo_fuego_activo)) return msgError(stats.vip ? "Ya sos VIP." : "Ya tenés un Festejo pendiente.", p.id);
+            if (stats.monedas < item.precio) return msgError(`Te faltan ${item.precio - stats.monedas} 💰.`, p.id);
             stats.monedas -= item.precio;
             if (id === "escudo_mmr") stats.escudo_mmr_activo = true;
             else if (id === "boost_xp") stats.boost_xp_activo = true;
             else if (id === "revivir_racha") stats.racha = stats.mejor_racha;
             else if (id === "festejo_fuego") stats.festejo_fuego_activo = true;
             else if (id === "titulo_custom" && args[2]) { stats.titulo_custom = args.slice(2).join(" ").slice(0, 30); invalidarCache("titulos", key); }
-            msgSuccess(`Compraste ${item.nombre} · Te quedan ${stats.monedas}💰`, p.id);
+            msgSuccess(`Compraste ${item.nombre}. Te quedan ${stats.monedas} 💰.`, p.id);
             markDirty(key);
         } else {
             const est = (id) => {
-                if (id === "escudo_mmr") return stats.escudo_mmr_activo ? " ✅ activo" : "";
-                if (id === "boost_xp") return stats.boost_xp_activo ? " ✅ activo" : "";
-                if (id === "titulo_custom") return stats.titulo_custom ? ` ✅ "${stats.titulo_custom}"` : "";
-                if (id === "festejo_fuego") return stats.vip ? " ✅ por ser VIP" : (stats.festejo_fuego_activo ? " ✅ activo" : "");
+                if (id === "escudo_mmr") return stats.escudo_mmr_activo ? "  ✓ activo" : "";
+                if (id === "boost_xp") return stats.boost_xp_activo ? "  ✓ activo" : "";
+                if (id === "titulo_custom") return stats.titulo_custom ? `  ✓ "${stats.titulo_custom}"` : "";
+                if (id === "festejo_fuego") return stats.vip ? "  ✓ por ser VIP" : (stats.festejo_fuego_activo ? "  ✓ activo" : "");
                 return "";
             };
             const porCat = {};
-            Object.entries(TIENDA_ITEMS).forEach(([id, it]) => { const c = it.categoria || "Otros"; (porCat[c] = porCat[c] || []).push(`${it.nombre} — ${it.precio}💰 · ${it.desc}${est(id)}\n   ↳ !tienda comprar ${id}`); });
-            const bl = Object.entries(porCat).map(([c, l]) => `▸ ${c}\n${l.join("\n")}`).join("\n\n");
-            sendAnnouncement(`🛒 Tienda · Tenés 💰${stats.monedas}\n\n${bl}\n\n👑 !tienda exclusivo para títulos únicos`, p.id, COLORES.oro, "small", 0);
+            Object.entries(TIENDA_ITEMS).forEach(([id, it]) => { const c = it.categoria || "Otros"; (porCat[c] = porCat[c] || []).push(`${it.nombre}  ·  ${it.precio} 💰${est(id)}\n   ${it.desc}\n   !tienda comprar ${id}`); });
+            const lineas = [];
+            for (const [c, items] of Object.entries(porCat)) {
+                lineas.push(`▸ ${c}`);
+                for (const it of items) lineas.push(`   ${it}`);
+                lineas.push("");
+            }
+            lineas.push("▸ Exclusivos");
+            lineas.push("   !tienda exclusivo  —  títulos únicos, uno por jugador");
+            msgCaja(`🛒 Tienda   ·   Saldo: ${stats.monedas} 💰`, lineas, COLORES.oro, "small-bold", 0, p.id);
         }
     },
     "!enviar": (p, args) => {
-        if (args.length < 2) return msgError("Uso: !enviar [jug] [cant]", p.id);
+        if (args.length < 2) return msgError("Uso: !enviar [jug] [cantidad].", p.id);
         const c = parseInt(args[args.length - 1], 10);
-        if (!validarCantidad(c, 10)) return msgError("Mínimo 10💰", p.id);
+        if (!validarCantidad(c, 10)) return msgError("Mínimo 10 💰.", p.id);
         const k = getPlayerKey(p), s = STATE.baseDatos[k];
-        if (s.monedas < c) return msgError(`Tenés ${s.monedas}💰`, p.id);
+        if (s.monedas < c) return msgError(`Saldo actual: ${s.monedas} 💰.`, p.id);
         const tk = findPlayerKeyByName(args.slice(0, -1).join(" "));
-        if (!tk || tk === k) return msgError("Jugador inválido", p.id);
-        const ts = STATE.baseDatos[tk]; if (!ts) return msgError("Jugador inválido", p.id);
+        if (!tk || tk === k) return msgError("Jugador inválido.", p.id);
+        const ts = STATE.baseDatos[tk]; if (!ts) return msgError("Jugador inválido.", p.id);
         s.monedas -= c; ts.monedas += c;
-        msgSuccess(`Le enviaste ${c}💰 a ${ts.nombre_actual}`, p.id);
+        msgSuccess(`Le enviaste ${c} 💰 a ${ts.nombre_actual}.`, p.id);
         const on = findOnlinePlayer(ts.nombre_actual);
-        if (on) msgSuccess(`${p.name} te envió ${c}💰`, on.id);
+        if (on) msgSuccess(`${p.name} te envió ${c} 💰.`, on.id);
         markDirty(k); markDirty(tk);
     },
     "!apostar": (p, args) => {
-        if (STATE.partidoEnCurso) return msgError("Durante partido no", p.id);
-        if (args.length < 2) return msgError("Uso: !apostar [rojo/azul/empate] [cant]", p.id);
+        if (STATE.partidoEnCurso) return msgError("No se puede apostar durante un partido.", p.id);
+        if (args.length < 2) return msgError("Uso: !apostar [rojo/azul/empate] [cantidad].", p.id);
         const el = args[0].toLowerCase(), c = parseInt(args[1], 10);
-        if (!validarCantidad(c, 1, CONFIG.MAX_APUESTA)) return msgError(`1-${CONFIG.MAX_APUESTA}💰`, p.id);
+        if (!validarCantidad(c, 1, CONFIG.MAX_APUESTA)) return msgError(`Cantidad entre 1 y ${CONFIG.MAX_APUESTA} 💰.`, p.id);
         const k = getPlayerKey(p), s = STATE.baseDatos[k];
-        if (s.monedas < c) return msgError(`Tenés ${s.monedas}💰`, p.id);
+        if (s.monedas < c) return msgError(`Saldo actual: ${s.monedas} 💰.`, p.id);
         let team;
         if (["rojo", "red"].includes(el)) team = 1;
         else if (["azul", "blue"].includes(el)) team = 2;
         else if (["empate", "draw"].includes(el)) team = 0;
-        else return msgError("Uso: !apostar [rojo/azul/empate] [cant]", p.id);
+        else return msgError("Uso: !apostar [rojo/azul/empate] [cantidad].", p.id);
         s.monedas -= c;
         STATE.apuestas[p.id] = { key: k, equipo: team, cantidad: c };
         s.apuestas_realizadas = (s.apuestas_realizadas || 0) + 1;
         if (s.apuestas_realizadas >= 20 && !s.badges.includes("apostador")) darBadge(p, "apostador");
-        msgSmall(`🎰 Apostaste ${c}💰`, p.id, COLORES.oro, "small", 1);
+        msgSmall(`🎰 Apostaste ${c} 💰.`, p.id, COLORES.oro, "small", 1);
         markDirty(k);
     },
-    "!casino": (p) => { sendAnnouncement(`🎰 CASINO\n\n🪙 !moneda [cant] · 50%: x${CONFIG.CUOTA_APUESTA}\n🃏 !veintiuno [cant] · !pedir/!plantar · x2\n🎡 !ruleta [rojo/negro/verde] [cant] · Rojo/Negro x2 · Verde x${CONFIG.RULETA_VERDE_PAYOUT}\n⚽ !apostar · al final del partido\n⚔️ !duelo [jug] [cant]`, p.id, COLORES.oro, "small", 0); },
+    "!casino": (p) => { sendAnnouncement(`🎰 Casino\n\n🪙 !moneda [cant]  ·  x${CONFIG.CUOTA_APUESTA}\n🃏 !veintiuno [cant]  ·  !pedir / !plantar  ·  x2\n🎡 !ruleta [rojo/negro/verde] [cant]\n    Rojo/Negro x2  ·  Verde x${CONFIG.RULETA_VERDE_PAYOUT}\n⚽ !apostar  ·  al final del partido\n⚔️ !duelo [jug] [cant]`, p.id, COLORES.oro, "small-bold", 0); },
     "!moneda": (p, args) => {
-        if (!args[0]) return msgError("Uso: !moneda [cantidad]", p.id);
+        if (!args[0]) return msgError("Uso: !moneda [cantidad].", p.id);
         const c = parseInt(args[0], 10);
-        if (!validarCantidad(c, 1, CONFIG.MAX_MONEDA)) return msgError(`1-${CONFIG.MAX_MONEDA}💰`, p.id);
+        if (!validarCantidad(c, 1, CONFIG.MAX_MONEDA)) return msgError(`Cantidad entre 1 y ${CONFIG.MAX_MONEDA} 💰.`, p.id);
         const k = getPlayerKey(p), s = STATE.baseDatos[k];
-        if (s.monedas < c) return msgError(`No te alcanza`, p.id);
+        if (s.monedas < c) return msgError(`Saldo insuficiente.`, p.id);
         s.monedas -= c;
         s.apuestas_realizadas = (s.apuestas_realizadas || 0) + 1;
         if (s.apuestas_realizadas >= 20 && !s.badges.includes("apostador")) darBadge(p, "apostador");
-        if (Math.random() < 0.5) { const pr = Math.round(c * CONFIG.CUOTA_APUESTA); s.monedas += pr; msgBox(`🪙 Cara — ganaste`, [`+${pr}💰`], COLORES.exito, "small", 1, p.id); }
-        else msgSmall(`🪙 Ceca — perdiste ${c}💰`, p.id, COLORES.error, "small", 1);
+        if (Math.random() < 0.5) { const pr = Math.round(c * CONFIG.CUOTA_APUESTA); s.monedas += pr; msgBox(`🪙 Cara — ganaste`, [`+${pr} 💰`], COLORES.exito, "small-bold", 1, p.id); }
+        else msgSmall(`🪙 Ceca — perdiste ${c} 💰.`, p.id, COLORES.error, "small", 1);
         markDirty(k);
     },
     "!veintiuno": (p, args) => {
-        if (STATE.blackjackActivo[p.id]) return msgError("Ya tenés mano en curso", p.id);
-        if (!args[0]) return msgError("Uso: !veintiuno [cantidad]", p.id);
+        if (STATE.blackjackActivo[p.id]) return msgError("Ya tenés una mano en curso.", p.id);
+        if (!args[0]) return msgError("Uso: !veintiuno [cantidad].", p.id);
         const c = parseInt(args[0], 10);
-        if (!validarCantidad(c, 1, CONFIG.MAX_BLACKJACK)) return msgError(`1-${CONFIG.MAX_BLACKJACK}💰`, p.id);
+        if (!validarCantidad(c, 1, CONFIG.MAX_BLACKJACK)) return msgError(`Cantidad entre 1 y ${CONFIG.MAX_BLACKJACK} 💰.`, p.id);
         const k = getPlayerKey(p), s = STATE.baseDatos[k];
-        if (s.monedas < c) return msgError(`No te alcanza`, p.id);
+        if (s.monedas < c) return msgError("Saldo insuficiente.", p.id);
         s.monedas -= c;
         s.apuestas_realizadas = (s.apuestas_realizadas || 0) + 1;
         if (s.apuestas_realizadas >= 20 && !s.badges.includes("apostador")) darBadge(p, "apostador");
@@ -1887,28 +2016,28 @@ const commands = {
         const cart = () => Math.min(11, Math.floor(Math.random() * 10) + 2);
         const mJ = [cart(), cart()], mC = [cart(), cart()];
         const tJ = mJ.reduce((a, b) => a + b, 0);
-        if (tJ === 21) { const pr = Math.round(c * 2.5); s.monedas += pr; markDirty(k); return msgBox(`🃏🔥 ¡BLACKJACK NATURAL!`, [`Tus cartas: ${mJ.join(" + ")} = 21`, `¡Redondo! ${pr}💰`], COLORES.exito, "small", 1, p.id); }
+        if (tJ === 21) { const pr = Math.round(c * 2.5); s.monedas += pr; markDirty(k); return msgBox(`🃏 ¡Blackjack natural!`, [`Tus cartas: ${mJ.join(" + ")} = 21`, `Ganaste ${pr} 💰.`], COLORES.exito, "small-bold", 1, p.id); }
         STATE.blackjackActivo[p.id] = { cantidad: c, manoJugador: mJ, manoCasa: mC, key: k, expira: Date.now() + 45000 };
         setTimeout(() => { if (STATE.blackjackActivo[p.id]?.expira && STATE.blackjackActivo[p.id].expira <= Date.now()) resolverBlackjack(p, true); }, 45000);
-        msgBox(`🃏 BLACKJACK`, [`Tus cartas: ${mJ.join(" + ")} = ${tJ}`, `Casa visible: ${mC[0]}`, `!pedir o !plantar`], COLORES.oro, "small", 1, p.id);
+        msgBox(`🃏 Blackjack`, [`Tus cartas: ${mJ.join(" + ")} = ${tJ}`, `Casa visible: ${mC[0]}`, `!pedir o !plantar`], COLORES.oro, "small-bold", 1, p.id);
     },
     "!pedir": (p) => {
-        const m = STATE.blackjackActivo[p.id]; if (!m) return msgError("No tenés mano activa", p.id);
+        const m = STATE.blackjackActivo[p.id]; if (!m) return msgError("No tenés una mano activa.", p.id);
         m.manoJugador.push(Math.min(11, Math.floor(Math.random() * 10) + 2));
         const t = m.manoJugador.reduce((a, b) => a + b, 0);
-        if (t > 21) { delete STATE.blackjackActivo[p.id]; return msgBox(`🃏 ¡Te pasaste!`, [`Tus cartas: ${m.manoJugador.join(" + ")} = ${t}`, `Perdiste ${m.cantidad}💰`], COLORES.error, "small", 1, p.id); }
+        if (t > 21) { delete STATE.blackjackActivo[p.id]; return msgBox(`🃏 Te pasaste`, [`Tus cartas: ${m.manoJugador.join(" + ")} = ${t}`, `Perdiste ${m.cantidad} 💰.`], COLORES.error, "small-bold", 1, p.id); }
         m.expira = Date.now() + 45000;
         msgSmall(`🃏 Tus cartas: ${m.manoJugador.join(" + ")} = ${t}`, p.id, COLORES.oro, "small", 0);
     },
-    "!plantar": (p) => { if (!STATE.blackjackActivo[p.id]) return msgError("No tenés mano activa", p.id); resolverBlackjack(p, false); },
+    "!plantar": (p) => { if (!STATE.blackjackActivo[p.id]) return msgError("No tenés una mano activa.", p.id); resolverBlackjack(p, false); },
     "!ruleta": (p, args) => {
         const col = (args[0] || "").toLowerCase();
         const cm = { rojo: "rojo", red: "rojo", negro: "negro", black: "negro", verde: "verde", green: "verde" };
-        if (!cm[col]) return msgError("Uso: !ruleta [rojo/negro/verde] [cantidad]", p.id);
+        if (!cm[col]) return msgError("Uso: !ruleta [rojo/negro/verde] [cantidad].", p.id);
         const c = parseInt(args[1], 10);
-        if (!validarCantidad(c, 1, CONFIG.MAX_RULETA)) return msgError(`1-${CONFIG.MAX_RULETA}💰`, p.id);
+        if (!validarCantidad(c, 1, CONFIG.MAX_RULETA)) return msgError(`Cantidad entre 1 y ${CONFIG.MAX_RULETA} 💰.`, p.id);
         const k = getPlayerKey(p), s = STATE.baseDatos[k];
-        if (s.monedas < c) return msgError(`No te alcanza`, p.id);
+        if (s.monedas < c) return msgError("Saldo insuficiente.", p.id);
         s.monedas -= c;
         s.apuestas_realizadas = (s.apuestas_realizadas || 0) + 1;
         if (s.apuestas_realizadas >= 20 && !s.badges.includes("apostador")) darBadge(p, "apostador");
@@ -1918,25 +2047,25 @@ const commands = {
         const em = { rojo: "🔴", negro: "⚫", verde: "🟢" };
         let pr = 0;
         if (el === sal) pr = el === "verde" ? c * CONFIG.RULETA_VERDE_PAYOUT : c * CONFIG.RULETA_ROJO_NEGRO_PAYOUT;
-        if (pr > 0) { s.monedas += pr; msgBox(`🎡✨ Salió ${em[sal]} ${sal.toUpperCase()}`, [`¡La pegaste! +${pr}💰`], COLORES.exito, "small", 1, p.id); }
-        else msgSmall(`🎡 Salió ${em[sal]} ${sal.toUpperCase()}, perdiste ${c}💰`, p.id, COLORES.error, "small", 1);
+        if (pr > 0) { s.monedas += pr; msgBox(`🎡 Salió ${em[sal]} ${sal.toUpperCase()}`, [`Ganaste ${pr} 💰.`], COLORES.exito, "small-bold", 1, p.id); }
+        else msgSmall(`🎡 Salió ${em[sal]} ${sal.toUpperCase()} — perdiste ${c} 💰.`, p.id, COLORES.error, "small", 1);
         markDirty(k);
     },
     "!duelo": (p, args) => {
-        if (args.length < 2) return msgError("Uso: !duelo [jugador] [cant]", p.id);
+        if (args.length < 2) return msgError("Uso: !duelo [jugador] [cantidad].", p.id);
         const { target, resto } = resolverJugadorYResto(args);
-        if (!target || target.id === p.id) return msgError("Jugador inválido", p.id);
+        if (!target || target.id === p.id) return msgError("Jugador inválido.", p.id);
         const c = parseInt(resto[0], 10);
-        if (!validarCantidad(c, 1, CONFIG.MAX_DUELO)) return msgError(`1-${CONFIG.MAX_DUELO}💰`, p.id);
+        if (!validarCantidad(c, 1, CONFIG.MAX_DUELO)) return msgError(`Cantidad entre 1 y ${CONFIG.MAX_DUELO} 💰.`, p.id);
         const k = getPlayerKey(p), s = STATE.baseDatos[k];
-        if (s.monedas < c) return msgError(`Tenés ${s.monedas}💰`, p.id);
+        if (s.monedas < c) return msgError(`Saldo actual: ${s.monedas} 💰.`, p.id);
         const ts = STATE.baseDatos[getPlayerKey(target)];
-        if (!ts || ts.monedas < c) return msgError(`${target.name} no tiene suficiente💰`, p.id);
-        if (STATE.duelosActivos.find(d => d.retado === target.id)) return msgError("Ese jugador ya tiene duelo pendiente", p.id);
+        if (!ts || ts.monedas < c) return msgError(`${target.name} no tiene saldo suficiente.`, p.id);
+        if (STATE.duelosActivos.find(d => d.retado === target.id)) return msgError("Ese jugador ya tiene un duelo pendiente.", p.id);
         s.monedas -= c; markDirty(k);
         STATE.duelosActivos.push({ retador: p.id, retado: target.id, cantidad: c, retadorKey: k, expira: Date.now() + 30000 });
-        msgBox(`⚔️ ¡DUELO!`, [`${p.name} te retó`, `Apuesta: ${c}💰`, `!aceptar o !rechazar`], COLORES.advertencia, "small", 2, target.id);
-        msgBox(`⚔️ ¡DUELO!`, [`Retaste a ${target.name}`, `${c}💰`, `Esperando...`], COLORES.advertencia, "small", 2, p.id);
+        msgBox(`⚔️ Duelo`, [`${p.name} te retó.`, `Apuesta: ${c} 💰`, `!aceptar  ·  !rechazar`], COLORES.advertencia, "small-bold", 2, target.id);
+        msgBox(`⚔️ Duelo enviado`, [`Retaste a ${target.name}.`, `${c} 💰`, `Esperando respuesta…`], COLORES.advertencia, "small-bold", 2, p.id);
         setTimeout(() => {
             const idx = STATE.duelosActivos.findIndex(d => d.retador === p.id && d.retado === target.id);
             if (idx !== -1) { const d = STATE.duelosActivos[idx]; STATE.duelosActivos.splice(idx, 1); const st = STATE.baseDatos[d.retadorKey]; if (st) { st.monedas += d.cantidad; markDirty(d.retadorKey); } msgSmall(`⌛ Duelo expirado`, p.id, COLORES.error, "small", 1); msgSmall(`⌛ Duelo expirado`, target.id, COLORES.error, "small", 0); }
@@ -1944,12 +2073,12 @@ const commands = {
     },
     "!aceptar": (p) => {
         const idx = STATE.duelosActivos.findIndex(d => d.retado === p.id);
-        if (idx === -1) return msgError("No tenés duelos pendientes", p.id);
+        if (idx === -1) return msgError("No tenés duelos pendientes.", p.id);
         const d = STATE.duelosActivos[idx]; STATE.duelosActivos.splice(idx, 1);
         const rt = STATE.room.getPlayer(d.retador);
-        if (!rt) { const st = STATE.baseDatos[d.retadorKey]; if (st) { st.monedas += d.cantidad; markDirty(d.retadorKey); } return msgError("El retador ya no está", p.id); }
+        if (!rt) { const st = STATE.baseDatos[d.retadorKey]; if (st) { st.monedas += d.cantidad; markDirty(d.retadorKey); } return msgError("El retador ya no está conectado.", p.id); }
         const sA = STATE.baseDatos[getPlayerKey(rt)], sB = STATE.baseDatos[getPlayerKey(p)];
-        if (!sA || !sB || sB.monedas < d.cantidad) { if (sA) { sA.monedas += d.cantidad; markDirty(getPlayerKey(rt)); } return msgError("No tenés suficiente💰", p.id); }
+        if (!sA || !sB || sB.monedas < d.cantidad) { if (sA) { sA.monedas += d.cantidad; markDirty(getPlayerKey(rt)); } return msgError("Saldo insuficiente.", p.id); }
         sB.monedas -= d.cantidad;
         const pr = 1 / (1 + Math.pow(10, (sB.mmr - sA.mmr) / 400));
         const gr = Math.random() < pr;
@@ -1960,42 +2089,42 @@ const commands = {
         sB.duelos_ganados = (sB.duelos_ganados || 0) + (gr ? 0 : 1);
         sB.duelos_perdidos = (sB.duelos_perdidos || 0) + (gr ? 1 : 0);
         const gan = gr ? rt : p, per = gr ? p : rt;
-        msgBox(`⚔️ Duelo ganado`, [`Venciste a ${per.name}`, `+${d.cantidad}💰`], COLORES.oro, "small", 2, gan.id);
-        msgBox(`⚔️ Duelo perdido`, [`${gan.name} te venció`, `-${d.cantidad}💰`], COLORES.error, "small", 2, per.id);
+        msgBox(`⚔️ Duelo ganado`, [`Venciste a ${per.name}.`, `+${d.cantidad} 💰`], COLORES.oro, "small-bold", 2, gan.id);
+        msgBox(`⚔️ Duelo perdido`, [`${gan.name} te venció.`, `-${d.cantidad} 💰`], COLORES.error, "small-bold", 2, per.id);
         [[rt, sA], [p, sB]].forEach(([pl, st]) => { if (st.duelos_ganados >= 10 && !st.badges.includes("duelista")) darBadge(pl, "duelista"); });
         markDirty(getPlayerKey(rt)); markDirty(getPlayerKey(p));
     },
     "!rechazar": (p) => {
         const idx = STATE.duelosActivos.findIndex(d => d.retado === p.id);
-        if (idx === -1) return msgError("No tenés duelos pendientes", p.id);
+        if (idx === -1) return msgError("No tenés duelos pendientes.", p.id);
         const d = STATE.duelosActivos[idx]; STATE.duelosActivos.splice(idx, 1);
         const rt = STATE.room.getPlayer(d.retador);
         const st = STATE.baseDatos[d.retadorKey]; if (st) { st.monedas += d.cantidad; markDirty(d.retadorKey); }
-        msgSmall(`🚫 Rechazaste el duelo${rt ? ` de ${rt.name}` : ""}`, p.id, COLORES.error, "small", 1);
-        if (rt) msgSmall(`🚫 ${p.name} rechazó tu duelo`, rt.id, COLORES.error, "small", 0);
+        msgSmall(`🚫 Rechazaste el duelo${rt ? ` de ${rt.name}` : ""}.`, p.id, COLORES.error, "small", 1);
+        if (rt) msgSmall(`🚫 ${p.name} rechazó tu duelo.`, rt.id, COLORES.error, "small", 0);
     },
     "!admin": (p, args, isA) => {
-        if (!esAdminEfectivo(p, isA)) return msgError("Solo admins", p.id);
-        if (!args[0]) return msgError("Uso: !admin [jugador]", p.id);
+        if (!esAdminEfectivo(p, isA)) return msgError("Solo admins.", p.id);
+        if (!args[0]) return msgError("Uso: !admin [jugador].", p.id);
         const { target } = resolverJugadorYResto(args);
-        if (!target) return msgError("No encontrado (debe estar conectado)", p.id);
-        if (target.admin) return msgError("Ya es admin", p.id);
+        if (!target) return msgError("No encontrado (debe estar conectado).", p.id);
+        if (target.admin) return msgError("Ya es admin.", p.id);
         STATE.room.setPlayerAdmin(target.id, true);
         const k = getPlayerKey(target);
         const s = STATE.baseDatos[k];
-        if (s && JERARQUIA_RANGOS.indexOf(s.rango || "normal") < JERARQUIA_RANGOS.indexOf("admin")) { s.rango = "admin"; markDirty(k); }
-        msgBox(`👑 ¡NUEVO ADMIN!`, [`${target.name}`], COLORES.oro, "small-bold", 2, p.id);
+        if (s && JERARQUIA_RANGOS.indexOf(s.rango || RANGOS.NORMAL) < JERARQUIA_RANGOS.indexOf(RANGOS.ADMIN)) { s.rango = RANGOS.ADMIN; markDirty(k); }
+        msgBox(`👑 Nuevo admin`, [`${target.name}`], COLORES.oro, "small-bold", 2, p.id);
         auditLog(p, "GIVE_ADMIN", target.name);
     },
     "!expulsar": (p, args, isA) => {
-        if (!args[0]) return msgError("Uso: !expulsar [jugador]", p.id);
+        if (!args[0]) return msgError("Uso: !expulsar [jugador].", p.id);
         const { target } = resolverJugadorYResto(args);
-        if (!target) return msgError("No encontrado", p.id);
+        if (!target) return msgError("No encontrado.", p.id);
         if (isA) { STATE.room.kickPlayer(target.id, "Expulsado", false); return; }
-        if (target.admin) return msgError("No se puede expulsar admins", p.id);
+        if (target.admin) return msgError("No se puede expulsar a un admin.", p.id);
         iniciarVotacion("expulsar", target, p);
     },
-    "!votar": (p, args) => { if (!args[0]) return msgError("Uso: !votar expulsar", p.id); votar(args[0].toLowerCase(), p); },
+    "!votar": (p, args) => { if (!args[0]) return msgError("Uso: !votar [expulsar/kick30/mute30].", p.id); votar(args[0].toLowerCase(), p); },
 
     "!afk": (p) => {
         const key = getPlayerKey(p);
@@ -2005,7 +2134,7 @@ const commands = {
             const ult = STATE.ultimoToggleAfk[p.id];
             if (ult && ahora - ult < CONFIG.AFK_TOGGLE_COOLDOWN_MS) {
                 const r = Math.ceil((CONFIG.AFK_TOGGLE_COOLDOWN_MS - (ahora - ult)) / 1000);
-                return msgError(`Esperá ${r}s antes de volver (evita el abuso de !afk para reposicionarte)`, p.id);
+                return msgError(`Esperá ${r}s antes de volver.`, p.id);
             }
         }
         STATE.ultimoToggleAfk[p.id] = ahora;
@@ -2014,7 +2143,7 @@ const commands = {
             const desde = STATE.afkDesde[p.id] || ahora;
             if (ahora - desde < CONFIG.AFK_MIN_DURACION_MS) {
                 const f = Math.ceil((CONFIG.AFK_MIN_DURACION_MS - (ahora - desde)) / 1000);
-                return msgError(`Estás AFK hace muy poco. Esperá ${f}s`, p.id);
+                return msgError(`Estás AFK hace muy poco. Esperá ${f}s.`, p.id);
             }
             STATE.afkPlayers.delete(p.id);
             delete STATE.afkDesde[p.id];
@@ -2026,22 +2155,22 @@ const commands = {
                 safeOperation(() => STATE.room.setPlayerTeam(p.id, r <= b ? 1 : 2));
             }
             STATE.playerLastMove[p.id] = ahora;
-            msgSuccess(`Volviste`, p.id);
+            msgSuccess("Volviste.", p.id);
         } else {
             STATE.afkPlayers.add(p.id);
             STATE.afkDesde[p.id] = ahora;
             STATE.afkCooldown.set(key, ahora + CONFIG.AFK_REINGRESO_COOLDOWN_MS);
             STATE.room.setPlayerTeam(p.id, 0);
-            msgSmall(`💤 ${p.name} está AFK`, p.id, COLORES.advertencia, "small-bold", 2);
-            msgSmall(`Volvé en ${Math.round(CONFIG.AFK_KICK_MS / 1000)}s o te saca el sistema`, p.id, 0xFF8800, "small", 1);
+            msgSmall(`💤 ${p.name} está AFK`, null, COLORES.advertencia, "small-bold", 2);
+            msgSmall(`Volvés en ${Math.round(CONFIG.AFK_KICK_MS / 1000)}s o te saca el sistema.`, p.id, 0xFF8800, "small", 1);
         }
     },
-    "!fueraafk": (p, args, isA) => { if (!esAdminEfectivo(p, isA)) return msgError("Solo admins", p.id); if (STATE.afkPlayers.size === 0) return msgInfo("No hay AFK", p.id); kickAFKs(p.name); },
+    "!fueraafk": (p, args, isA) => { if (!esAdminEfectivo(p, isA)) return msgError("Solo admins.", p.id); if (STATE.afkPlayers.size === 0) return msgInfo("No hay jugadores AFK.", p.id); kickAFKs(p.name); },
     "!iniciar": (p, args, isA) => {
         if (!esAdminEfectivo(p, isA)) return;
-        if (STATE.partidoEnCurso) return msgError("Ya hay partido", p.id);
+        if (STATE.partidoEnCurso) return msgError("Ya hay un partido en curso.", p.id);
         const all = STATE.room.getPlayerList().filter(x => !x.admin && !STATE.afkPlayers.has(x.id));
-        if (all.length === 0) return msgError("No hay jugadores", p.id);
+        if (all.length === 0) return msgError("No hay jugadores disponibles.", p.id);
         const { equipo1, equipo2 } = balancearEquiposElo(all);
         all.forEach(pl => STATE.room.setPlayerTeam(pl.id, 0));
         equipo1.forEach(j => STATE.room.setPlayerTeam(j.id, 1));
@@ -2052,7 +2181,7 @@ const commands = {
         if (!esAdminEfectivo(p, isA)) return;
         STATE.jueganTodosActivo = !STATE.jueganTodosActivo;
         STATE.automatizadoActivado = false; STATE.bracketFijo = null;
-        msgSmall(STATE.jueganTodosActivo ? "✅ Juegan todos: ON" : "❌ Juegan todos: OFF", p.id, STATE.jueganTodosActivo ? 0x00FF88 : 0xFF3366, "small-bold", 1);
+        msgSmall(STATE.jueganTodosActivo ? "✅ Juegan todos: activado." : "❌ Juegan todos: desactivado.", p.id, STATE.jueganTodosActivo ? 0x00FF88 : 0xFF3366, "small-bold", 1);
         if (STATE.jueganTodosActivo) STATE.room.getPlayerList().filter(pl => pl.team === 0 && !pl.admin).forEach(pl => {
             const r = STATE.room.getPlayerList().filter(x => x.team === 1).length;
             const b = STATE.room.getPlayerList().filter(x => x.team === 2).length;
@@ -2062,83 +2191,83 @@ const commands = {
     "!auto": (p, args, isA) => {
         if (!esAdminEfectivo(p, isA)) return;
         STATE.automatizadoActivado = !STATE.automatizadoActivado; STATE.bracketFijo = null;
-        msgSmall(STATE.automatizadoActivado ? "✅ Modo auto: ON" : "❌ Modo auto: OFF", p.id, STATE.automatizadoActivado ? 0x00FF88 : 0xFF3366, "small-bold", 1);
+        msgSmall(STATE.automatizadoActivado ? "✅ Modo auto: activado." : "❌ Modo auto: desactivado.", p.id, STATE.automatizadoActivado ? 0x00FF88 : 0xFF3366, "small-bold", 1);
         if (STATE.automatizadoActivado) { STATE.jueganTodosActivo = true; STATE.fairPlayActivo = false; ejecutarAutomatizado(true); anunciarModoAutomatizado(); }
     },
     "!detener": (p, args, isA) => { if (esAdminEfectivo(p, isA)) STATE.room.stopGame(); },
     "!echar": (p, args, isA) => {
         if (!esAdminEfectivo(p, isA)) return;
         const { target } = resolverJugadorYResto(args);
-        if (!target) return msgError("No encontrado", p.id);
-        if (target.admin) return msgError("No se puede expulsar admins", p.id);
+        if (!target) return msgError("No encontrado.", p.id);
+        if (target.admin) return msgError("No se puede expulsar a un admin.", p.id);
         STATE.room.kickPlayer(target.id, "Expulsado", false);
     },
-    "!powershot": (p, args, isA) => { if (!esAdminEfectivo(p, isA)) return; STATE.powershotActivado = !STATE.powershotActivado; msgSmall(STATE.powershotActivado ? "🔥 Powershot ON" : "❄️ Powershot OFF", p.id, STATE.powershotActivado ? 0xFF3366 : 0x00BFFF, "small-bold", 1); },
+    "!powershot": (p, args, isA) => { if (!esAdminEfectivo(p, isA)) return; STATE.powershotActivado = !STATE.powershotActivado; msgSmall(STATE.powershotActivado ? "🔥 Powershot activado." : "❄️ Powershot desactivado.", p.id, STATE.powershotActivado ? 0xFF3366 : 0x00BFFF, "small-bold", 1); },
     "!curva": (p, args, isA) => {
         if (!esAdminEfectivo(p, isA)) return;
-        if (!STATE.powershotActivado) return msgError("Primero activá !powershot", p.id);
+        if (!STATE.powershotActivado) return msgError("Activá primero !powershot.", p.id);
         STATE.curvaActivado = !STATE.curvaActivado;
-        msgSmall(STATE.curvaActivado ? "🌀 Curva ON" : "❌ Curva OFF", p.id, STATE.curvaActivado ? 0x00FFC8 : 0xFF3366, "small-bold", 1);
+        msgSmall(STATE.curvaActivado ? "🌀 Curva activada." : "❌ Curva desactivada.", p.id, STATE.curvaActivado ? 0x00FFC8 : 0xFF3366, "small-bold", 1);
     },
     "!rainbow": (p, args, isA) => {
         if (!esAdminEfectivo(p, isA)) return;
-        if (!STATE.rainbowEquipoActivo) return msgError("No hay rainbow activo", p.id);
+        if (!STATE.rainbowEquipoActivo) return msgError("No hay rainbow activo.", p.id);
         restaurarCamisetaEquipo(STATE.rainbowEquipoActivo.team, STATE.rainbowEquipoActivo.colorOriginal);
         STATE.rainbowEquipoActivo = null;
-        msgSuccess("Rainbow desactivado, camiseta restaurada", p.id);
+        msgSuccess("Rainbow desactivado, camiseta restaurada.", p.id);
     },
-    "!fairplay": (p, args, isA) => { if (esAdminEfectivo(p, isA)) { STATE.fairPlayActivo = !STATE.fairPlayActivo; msgSmall(`FairPlay: ${STATE.fairPlayActivo}`, p.id, COLORES.exito, "small-bold", 1); } },
-    "!ganasigue": (p, args, isA) => { if (esAdminEfectivo(p, isA)) { STATE.ganaSigueActivo = !STATE.ganaSigueActivo; msgSmall(`GanaSigue: ${STATE.ganaSigueActivo}`, p.id, COLORES.exito, "small-bold", 1); } },
-    "!goldeoro": (p, args, isA) => { if (esAdminEfectivo(p, isA)) { STATE.golDeOroActivo = !STATE.golDeOroActivo; msgSmall(`GolDeOro: ${STATE.golDeOroActivo}`, p.id, COLORES.exito, "small-bold", 1); } },
+    "!fairplay": (p, args, isA) => { if (esAdminEfectivo(p, isA)) { STATE.fairPlayActivo = !STATE.fairPlayActivo; msgSmall(`FairPlay: ${STATE.fairPlayActivo ? "activado" : "desactivado"}.`, p.id, COLORES.exito, "small-bold", 1); } },
+    "!ganasigue": (p, args, isA) => { if (esAdminEfectivo(p, isA)) { STATE.ganaSigueActivo = !STATE.ganaSigueActivo; msgSmall(`Gana y sigue: ${STATE.ganaSigueActivo ? "activado" : "desactivado"}.`, p.id, COLORES.exito, "small-bold", 1); } },
+    "!goldeoro": (p, args, isA) => { if (esAdminEfectivo(p, isA)) { STATE.golDeOroActivo = !STATE.golDeOroActivo; msgSmall(`Gol de oro: ${STATE.golDeOroActivo ? "activado" : "desactivado"}.`, p.id, COLORES.exito, "small-bold", 1); } },
     "!tamano": (p, args) => {
         const s = STATE.baseDatos[getPlayerKey(p)];
-        if (!esOwner(p) && !s?.vip) return msgError("Tamaño solo para VIP", p.id);
+        if (!esOwner(p) && !s?.vip) return msgError("Tamaño personalizado sólo para VIP.", p.id);
         const min = CONFIG.TAMANO_MIN;
         const max = esOwner(p) && !s?.vip ? CONFIG.TAMANO_MAX : tierVipDe(s).max;
         const sz = parseFloat(args[0]);
-        if (isNaN(sz) || sz < min || sz > max) return msgError(`Uso: !tamano [${min}-${max}]`, p.id);
+        if (isNaN(sz) || sz < min || sz > max) return msgError(`Uso: !tamano [${min}-${max}].`, p.id);
         s.tamano_personalizado = sz;
         markDirty(getPlayerKey(p));
         if (p.team !== 0) { aplicarTamanoPersistente(p); setTimeout(() => aplicarTamanoPersistente(p), 100); }
         msgSmall(`📏 ${p.name} tamaño base: ${sz}`, p.id, 0x9BFF35, "small", 0);
     },
-    "!ids": (p) => { const t = STATE.room.getPlayerList().map(pl => `[${pl.id}] ${pl.name}${pl.admin ? " 👑" : ""}`).join("\n"); sendAnnouncement(`🆔 JUGADORES:\n${t || "Nadie"}`, p.id, 0xFFFFFF, "small-bold", 0); },
-    "!discord": (p) => msgArrow(`⚡ DISCORD`, CONFIG.DISCORD_INVITE, p.id, 0x5865F2, 1),
+    "!ids": (p) => { const t = STATE.room.getPlayerList().map(pl => `[${pl.id}] ${pl.name}${pl.admin ? " 👑" : ""}`).join("\n"); sendAnnouncement(`🆔 Jugadores\n${t || "Nadie"}`, p.id, 0xFFFFFF, "small-bold", 0); },
+    "!discord": (p) => msgArrow(`⚡ Discord`, CONFIG.DISCORD_INVITE, p.id, 0x5865F2, 1),
     "!verificacion": (p) => {
         const k = getPlayerKey(p), s = STATE.baseDatos[k] || initStats(p);
-        if (s.discord_verificado) return msgInfo("✅ Ya verificaste", p.id);
+        if (s.discord_verificado) return msgInfo("Ya verificaste tu cuenta.", p.id);
         const ahora = Date.now();
         let cod = Object.entries(STATE.verificacionesPendientes).find(([, v]) => v.key === k && v.expira > ahora)?.[0];
         if (!cod) { do { cod = String(Math.floor(100000 + Math.random() * 900000)); } while (STATE.verificacionesPendientes[cod]); STATE.verificacionesPendientes[cod] = { key: k, playerId: p.id, nombre: p.name, expira: ahora + CONFIG.VERIFICACION_EXPIRA_MS }; }
         const m = Math.round(CONFIG.VERIFICACION_EXPIRA_MS / 60000);
-        msgBox(`🔗 VERIFICACIÓN DE DISCORD`, [`1) Entrá a: ${CONFIG.DISCORD_INVITE}`, `2) Canal ${CONFIG.VERIFICACION_CANAL}`, `3) Escribí tu código: ${cod}`, `⏳ Válido ${m} min`], 0x5865F2, "small-bold", 2, p.id);
+        msgBox(`🔗 Verificación de Discord`, [`1) Entrá a: ${CONFIG.DISCORD_INVITE}`, `2) Canal ${CONFIG.VERIFICACION_CANAL}`, `3) Escribí tu código: ${cod}`, `⏳ Válido ${m} min`], 0x5865F2, "small-bold", 2, p.id);
         notificarMensaje(`🔗 **${p.name}** pidió verificación — código \`${cod}\``);
     },
     "!verificar": (p, args, isA) => {
-        if (!esAdminEfectivo(p, isA)) return msgError("Solo admins", p.id);
+        if (!esAdminEfectivo(p, isA)) return msgError("Solo admins.", p.id);
         const cod = (args[0] || "").trim();
-        if (!cod) return msgError("Uso: !verificar [código]", p.id);
+        if (!cod) return msgError("Uso: !verificar [código].", p.id);
         const pend = STATE.verificacionesPendientes[cod];
-        if (!pend || pend.expira < Date.now()) { delete STATE.verificacionesPendientes[cod]; return msgError("Código inválido o vencido", p.id); }
+        if (!pend || pend.expira < Date.now()) { delete STATE.verificacionesPendientes[cod]; return msgError("Código inválido o vencido.", p.id); }
         confirmarVerificacionDiscord(cod);
-        msgSuccess(`Verificado ${pend.nombre}`, p.id);
+        msgSuccess(`Verificado ${pend.nombre}.`, p.id);
     },
-    "!dinero": (p) => { const s = STATE.baseDatos[getPlayerKey(p)] || initStats(p); msgInfo(`💰 Tenés ${s.monedas} monedas`, p.id); },
+    "!dinero": (p) => { const s = STATE.baseDatos[getPlayerKey(p)] || initStats(p); msgInfo(`Tenés ${s.monedas} monedas.`, p.id); },
     "!misiones": (p) => {
         const s = STATE.baseDatos[getPlayerKey(p)];
         actualizarMisionDiaria(s); actualizarMisionSemanal(s);
-        sendAnnouncement(`🎯 Hoy: ${s.misiones.goles}/${CONFIG.MISION_GOLES_OBJETIVO} goles ${s.misiones.completadas.includes("goles_dia") ? "✅" : ""}\n🗓️ Semana: ${s.misionSemanal.partidos}/${CONFIG.MISION_SEMANAL_PARTIDOS_OBJETIVO} partidos ${s.misionSemanal.completada ? "✅" : ""}`, p.id, COLORES.info, "small", 0);
+        sendAnnouncement(`🎯 Hoy: ${s.misiones.goles}/${CONFIG.MISION_GOLES_OBJETIVO} goles ${s.misiones.completadas.includes("goles_dia") ? "✅" : ""}\n🗓️ Semana: ${s.misionSemanal.partidos}/${CONFIG.MISION_SEMANAL_PARTIDOS_OBJETIVO} partidos ${s.misionSemanal.completada ? "✅" : ""}`, p.id, COLORES.info, "small-bold", 0);
     },
     "!clan": (p, args) => {
         const k = getPlayerKey(p), s = STATE.baseDatos[k];
         const sub = (args[0] || "").toLowerCase();
         if (sub === "crear") {
             const nom = args.slice(1).join(" ").trim().slice(0, 25);
-            if (!nom) return msgError("Uso: !clan crear [nombre]", p.id);
-            if (s.clan) return msgError("Ya estás en un clan", p.id);
-            if (s.monedas < CONFIG.CLAN_CREAR_COSTO) return msgError(`Necesitás ${CONFIG.CLAN_CREAR_COSTO}💰`, p.id);
+            if (!nom) return msgError("Uso: !clan crear [nombre].", p.id);
+            if (s.clan) return msgError("Ya estás en un clan.", p.id);
+            if (s.monedas < CONFIG.CLAN_CREAR_COSTO) return msgError(`Necesitás ${CONFIG.CLAN_CREAR_COSTO} 💰.`, p.id);
             const id = nom.toLowerCase();
-            if (STATE.clanes[id]) return msgError("Ya existe ese clan", p.id);
+            if (STATE.clanes[id]) return msgError("Ya existe un clan con ese nombre.", p.id);
             s.monedas -= CONFIG.CLAN_CREAR_COSTO;
             STATE.clanes[id] = { nombre: nom, lider: k, miembros: [k], creado: Date.now(), nivel: 1, xp: 0 };
             s.clan = id;
@@ -2146,78 +2275,86 @@ const commands = {
             msgBox("⚔️ Clan fundado", [`${nom}`, `Líder: ${p.name}`], 0xFF00FF, "small-bold", 1);
             markDirty(k);
         } else if (sub === "invitar") {
-            if (!s.clan || !STATE.clanes[s.clan]) return msgError("No tenés clan", p.id);
+            if (!s.clan || !STATE.clanes[s.clan]) return msgError("No tenés clan.", p.id);
             const c = STATE.clanes[s.clan];
-            if (c.lider !== k) return msgError("Solo el líder invita", p.id);
-            if (c.miembros.length >= CONFIG.CLAN_MAX_MIEMBROS) return msgError("Clan lleno", p.id);
+            if (c.lider !== k) return msgError("Solo el líder puede invitar.", p.id);
+            if (c.miembros.length >= CONFIG.CLAN_MAX_MIEMBROS) return msgError("El clan está lleno.", p.id);
             const t = findOnlinePlayer(args.slice(1).join(" "));
-            if (!t) return msgError("No encontrado", p.id);
+            if (!t) return msgError("No encontrado.", p.id);
             const tk = getPlayerKey(t);
-            if (STATE.baseDatos[tk]?.clan) return msgError("Ese jugador ya tiene clan", p.id);
+            if (STATE.baseDatos[tk]?.clan) return msgError("Ese jugador ya tiene clan.", p.id);
             STATE.clanInvitaciones[tk] = { clan: s.clan, invitadoPor: p.name, expira: Date.now() + CONFIG.CLAN_INVITACION_TTL_MS };
-            msgSmall(`⚔️ ${t.name} invitado a ${c.nombre}`, null, COLORES.advertencia, "small", 1);
-            msgInfo(`⚔️ ${p.name} te invitó al clan "${c.nombre}". Usá !clan aceptar`, t.id);
+            msgSmall(`⚔️ ${t.name} fue invitado a ${c.nombre}.`, null, COLORES.advertencia, "small", 1);
+            msgInfo(`⚔️ ${p.name} te invitó al clan "${c.nombre}". Usá !clan aceptar.`, t.id);
         } else if (sub === "aceptar") {
             const inv = STATE.clanInvitaciones[k];
-            if (!inv) return msgError("No tenés invitaciones", p.id);
-            if (inv.expira && inv.expira < Date.now()) { delete STATE.clanInvitaciones[k]; return msgError("La invitación expiró", p.id); }
+            if (!inv) return msgError("No tenés invitaciones pendientes.", p.id);
+            if (inv.expira && inv.expira < Date.now()) { delete STATE.clanInvitaciones[k]; return msgError("La invitación expiró.", p.id); }
             const c = STATE.clanes[inv.clan];
-            if (!c) { delete STATE.clanInvitaciones[k]; return msgError("Ese clan ya no existe", p.id); }
-            if (s.clan) return msgError("Ya estás en un clan", p.id);
+            if (!c) { delete STATE.clanInvitaciones[k]; return msgError("Ese clan ya no existe.", p.id); }
+            if (s.clan) return msgError("Ya estás en un clan.", p.id);
             c.miembros.push(k); s.clan = inv.clan; delete STATE.clanInvitaciones[k];
-            msgBox("⚔️ Nuevo en el clan", [`${p.name} se unió a ${c.nombre}`], COLORES.exito, "small-bold", 1);
+            msgBox("⚔️ Nuevo miembro", [`${p.name} se unió a ${c.nombre}`], COLORES.exito, "small-bold", 1);
             markDirty(k);
         } else if (sub === "salir") {
-            if (!s.clan || !STATE.clanes[s.clan]) return msgError("No tenés clan", p.id);
+            if (!s.clan || !STATE.clanes[s.clan]) return msgError("No tenés clan.", p.id);
             const c = STATE.clanes[s.clan];
             c.miembros = c.miembros.filter(m => m !== k);
             if (c.lider === k) { if (c.miembros.length > 0) c.lider = c.miembros[0]; else delete STATE.clanes[s.clan]; }
-            msgSmall(`${p.name} abandonó el clan`, p.id, COLORES.advertencia, "small", 1);
+            msgSmall(`${p.name} abandonó el clan.`, p.id, COLORES.advertencia, "small", 1);
             s.clan = null; markDirty(k);
         } else if (sub === "info") {
             const id = args.slice(1).join(" ").toLowerCase() || s.clan;
             const c = STATE.clanes[id];
-            if (!c) return msgError("Clan no encontrado", p.id);
-            sendAnnouncement(`⚔️ ${c.nombre}\nNv ${c.nivel || 1} (${c.xp || 0}/${xpNecesariaParaNivel(c.nivel || 1)} XP) · Líder: ${STATE.baseDatos[c.lider]?.nombre_actual || "?"}\nMiembros: ${c.miembros.map(kk => STATE.baseDatos[kk]?.nombre_actual || "?").join(", ")}`, p.id, 0xFF00FF, "small-bold", 0);
+            if (!c) return msgError("Clan no encontrado.", p.id);
+            msgCaja(
+                `⚔️ ${c.nombre}`,
+                [
+                    `Nivel ${c.nivel || 1}   ·   ${c.xp || 0} / ${xpNecesariaParaNivel(c.nivel || 1)} XP`,
+                    `Líder: ${STATE.baseDatos[c.lider]?.nombre_actual || "?"}`,
+                    `Miembros (${c.miembros.length}): ${c.miembros.map(kk => STATE.baseDatos[kk]?.nombre_actual || "?").join(", ")}`,
+                ],
+                0xFF00FF, "small-bold", 0, p.id
+            );
         } else if (sub === "tabla") {
             const r = Object.values(STATE.clanes).map(c => ({ nombre: c.nombre, nivel: c.nivel || 1, mmrProm: Math.round(c.miembros.reduce((sm, kk) => sm + (STATE.baseDatos[kk]?.mmr || 1000), 0) / (c.miembros.length || 1)), miembros: c.miembros.length })).sort((a, b) => b.nivel - a.nivel || b.mmrProm - a.mmrProm).slice(0, 5);
-            msgBox("⚔️ Top clanes", r.length ? r.map((c, i) => `${i + 1}. ${c.nombre} Nv.${c.nivel} ELO:${c.mmrProm} (${c.miembros})`) : ["Sin clanes aún"], 0xFF00FF, "small-bold", 0, p.id);
+            msgBox("⚔️ Top clanes", r.length ? r.map((c, i) => `${i + 1}. ${c.nombre}  ·  Nv.${c.nivel}  ·  ELO ${c.mmrProm}  ·  ${c.miembros} miembros`) : ["Sin clanes todavía."], 0xFF00FF, "small-bold", 0, p.id);
         } else msgInfo("Uso: !clan crear/invitar/aceptar/salir/info/tabla", p.id);
     },
     "!reportar": (p, args) => {
-        if (!args.length) return msgError("Uso: !reportar [jugador] [motivo]", p.id);
+        if (!args.length) return msgError("Uso: !reportar [jugador] [motivo].", p.id);
         const { target, resto } = resolverJugadorYResto(args);
-        if (!target || target.id === p.id) return msgError("Jugador inválido", p.id);
+        if (!target || target.id === p.id) return msgError("Jugador inválido.", p.id);
         const m = resto.join(" ") || "Sin especificar";
         STATE.reportes.push({ reportado: getPlayerKey(target), reportadoNombre: target.name, reportante: p.name, motivo: m, fecha: Date.now() });
         if (STATE.reportes.length > 200) STATE.reportes.splice(0, STATE.reportes.length - 200);
-        msgSuccess(`Reporte enviado sobre ${target.name}`, p.id);
+        msgSuccess(`Reporte enviado sobre ${target.name}.`, p.id);
         modificarFairPlay(target, -3, "reportado");
     },
     "!reportes": (p, args, isA) => {
         if (!esAdminEfectivo(p, isA)) return;
         const u = STATE.reportes.slice(-10).reverse();
-        if (!u.length) return msgInfo("Sin reportes", p.id);
-        sendAnnouncement(`📋 ÚLTIMOS REPORTES:\n${u.map(r => `${r.reportadoNombre} ← ${r.reportante}: ${r.motivo}`).join("\n")}`, p.id, COLORES.advertencia, "small-bold", 0);
+        if (!u.length) return msgInfo("Sin reportes.", p.id);
+        sendAnnouncement(`📋 Últimos reportes\n${u.map(r => `${r.reportadoNombre} ← ${r.reportante}: ${r.motivo}`).join("\n")}`, p.id, COLORES.advertencia, "small-bold", 0);
     },
     "!llamar": (p, args) => {
         const ahora = Date.now();
-        if (STATE.ultimoLlamadoAdmin && ahora - STATE.ultimoLlamadoAdmin < CONFIG.LLAMARADMIN_COOLDOWN_MS) return msgError("Ya se avisó hace poco", p.id);
+        if (STATE.ultimoLlamadoAdmin && ahora - STATE.ultimoLlamadoAdmin < CONFIG.LLAMARADMIN_COOLDOWN_MS) return msgError("Ya se avisó a los admins hace poco.", p.id);
         STATE.ultimoLlamadoAdmin = ahora;
         const m = args.join(" ") || "sin especificar";
-        msgWarn(`${p.name} está llamando a un admin`, null);
+        msgWarn(`${p.name} está llamando a un admin.`, null);
         STATE.room.getPlayerList().filter(pl => pl.admin).forEach(pl => msgInfo(`📣 ${p.name} llamó: ${m}`, pl.id));
         msgSmall(`🔰 Se avisó a los admins. Motivo: "${m}"`, p.id, COLORES.advertencia, "small-bold", 1);
     },
     "!callar": (p, args, isA) => {
         if (!isA && !puedeUsar(p, "!callar")) return;
-        if (!args[0]) return msgError("Uso: !callar [jugador] [1s/1m/1h]", p.id);
+        if (!args[0]) return msgError("Uso: !callar [jugador] [1s/1m/1h].", p.id);
         const po = args[args.length - 1], pd = parseDuracion(po);
         const tD = args.length > 1 && pd !== null;
         const nA = tD ? args.slice(0, -1) : args;
         const { target, key: tk } = resolverJugadorYResto(nA);
-        if (!tk) return msgError("No encontrado", p.id);
-        if (!actorSuperaKey(p, tk)) return msgError("No podés mutear a alguien de rango igual o mayor", p.id);
+        if (!tk) return msgError("No encontrado.", p.id);
+        if (!actorSuperaKey(p, tk)) return msgError("No podés mutear a alguien de rango igual o mayor.", p.id);
         const dur = tD ? pd : CONFIG.MUTE_DEFAULT_MIN * 60000;
         STATE.mutesTemporales = STATE.mutesTemporales.filter(m => m.auth !== tk);
         STATE.mutesTemporales.push({ auth: tk, timestamp: Date.now(), duracion: dur });
@@ -2227,20 +2364,20 @@ const commands = {
     "!hablar": (p, args, isA) => {
         if (!isA && !puedeUsar(p, "!hablar")) return;
         const { target, key: tk } = resolverJugadorYResto(args);
-        if (!tk) return msgError("No encontrado", p.id);
+        if (!tk) return msgError("No encontrado.", p.id);
         const a = STATE.mutesTemporales.length;
         STATE.mutesTemporales = STATE.mutesTemporales.filter(m => m.auth !== tk);
-        if (STATE.mutesTemporales.length < a) msgSuccess(`${target ? target.name : STATE.baseDatos[tk]?.nombre_actual} puede hablar`, p.id);
-        else msgError("No estaba silenciado", p.id);
+        if (STATE.mutesTemporales.length < a) msgSuccess(`${target ? target.name : STATE.baseDatos[tk]?.nombre_actual} puede hablar.`, p.id);
+        else msgError("No estaba silenciado.", p.id);
     },
     "!vetar": (p, args, isA) => {
-        if (!puedeUsar(p, "!vetar")) return msgError("Sin permiso", p.id);
-        if (!args[0]) return msgError("Uso: !vetar [jugador] [motivo]", p.id);
+        if (!puedeUsar(p, "!vetar")) return msgError("Sin permiso.", p.id);
+        if (!args[0]) return msgError("Uso: !vetar [jugador] [motivo].", p.id);
         const { target, key, resto } = resolverJugadorYResto(args);
-        if (!key || !STATE.baseDatos[key]) return msgError("No encontrado", p.id);
-        if (!actorSuperaKey(p, key)) return msgError("No podés banear a alguien de rango igual o mayor", p.id);
+        if (!key || !STATE.baseDatos[key]) return msgError("No encontrado.", p.id);
+        if (!actorSuperaKey(p, key)) return msgError("No podés banear a alguien de rango igual o mayor.", p.id);
         const motivo = resto.join(" ").trim();
-        if (motivo.length < 3) return msgError("Necesitás especificar un motivo (mín. 3 caracteres)", p.id);
+        if (motivo.length < 3) return msgError("Necesitás especificar un motivo (mín. 3 caracteres).", p.id);
         aplicarBanGlobal(key, CONFIG.BAN_DIAS_NORMAL * 86400000);
         const n = target ? target.name : STATE.baseDatos[key].nombre_actual;
         if (target) STATE.room.kickPlayer(target.id, `⛔ Baneado ${CONFIG.BAN_DIAS_NORMAL}d. Motivo: ${motivo}`, false);
@@ -2249,13 +2386,13 @@ const commands = {
         auditLog(p, "BAN", n, `${CONFIG.BAN_DIAS_NORMAL}d · ${motivo}`);
     },
     "!vetamin": (p, args, isA) => {
-        if (!puedeUsar(p, "!vetamin")) return msgError("Sin permiso", p.id);
-        if (!args[0]) return msgError("Uso: !vetamin [jugador] [motivo]", p.id);
+        if (!puedeUsar(p, "!vetamin")) return msgError("Sin permiso.", p.id);
+        if (!args[0]) return msgError("Uso: !vetamin [jugador] [motivo].", p.id);
         const { target, key, resto } = resolverJugadorYResto(args);
-        if (!key || !STATE.baseDatos[key]) return msgError("No encontrado", p.id);
-        if (!actorSuperaKey(p, key)) return msgError("No podés banear a alguien de rango igual o mayor", p.id);
+        if (!key || !STATE.baseDatos[key]) return msgError("No encontrado.", p.id);
+        if (!actorSuperaKey(p, key)) return msgError("No podés banear a alguien de rango igual o mayor.", p.id);
         const motivo = resto.join(" ").trim();
-        if (motivo.length < 3) return msgError("Motivo obligatorio (mín. 3)", p.id);
+        if (motivo.length < 3) return msgError("Motivo obligatorio (mín. 3 caracteres).", p.id);
         aplicarBanGlobal(key, CONFIG.BAN_DIAS_LOW * 86400000);
         const n = target ? target.name : STATE.baseDatos[key].nombre_actual;
         if (target) STATE.room.kickPlayer(target.id, `⛔ Baneado ${CONFIG.BAN_DIAS_LOW}d: ${motivo}`, false);
@@ -2263,26 +2400,26 @@ const commands = {
         auditLog(p, "BAN_MIN", n, `${CONFIG.BAN_DIAS_LOW}d · ${motivo}`);
     },
     "!desvetar": (p, args) => {
-        if (!puedeUsar(p, "!desvetar")) return msgError("Sin permiso", p.id);
-        if (!args[0]) return msgError("Uso: !desvetar [jugador]", p.id);
+        if (!puedeUsar(p, "!desvetar")) return msgError("Sin permiso.", p.id);
+        if (!args[0]) return msgError("Uso: !desvetar [jugador].", p.id);
         const key = findPlayerKeyByName(args.join(" "));
-        if (!key || !STATE.baseDatos[key]) return msgError("No encontrado", p.id);
+        if (!key || !STATE.baseDatos[key]) return msgError("No encontrado.", p.id);
         quitarBanGlobal(key);
-        msgSuccess(`${STATE.baseDatos[key].nombre_actual} ya no está baneado`, p.id);
+        msgSuccess(`${STATE.baseDatos[key].nombre_actual} ya no está baneado.`, p.id);
         auditLog(p, "UNBAN", STATE.baseDatos[key].nombre_actual);
     },
     "!advertir": (p, args) => {
-        if (!puedeUsar(p, "!advertir")) return msgError("Sin permiso", p.id);
-        if (!args[0]) return msgError("Uso: !advertir [jugador] [motivo]", p.id);
+        if (!puedeUsar(p, "!advertir")) return msgError("Sin permiso.", p.id);
+        if (!args[0]) return msgError("Uso: !advertir [jugador] [motivo].", p.id);
         const { target, key, resto } = resolverJugadorYResto(args);
-        if (!key || !STATE.baseDatos[key]) return msgError("No encontrado", p.id);
-        if (!actorSuperaKey(p, key)) return msgError("No podés warnear a alguien de rango igual o mayor", p.id);
+        if (!key || !STATE.baseDatos[key]) return msgError("No encontrado.", p.id);
+        if (!actorSuperaKey(p, key)) return msgError("No podés warnear a alguien de rango igual o mayor.", p.id);
         const m = resto.join(" ") || "sin especificar";
         const s = STATE.baseDatos[key];
         const hoy = getDiaString(Date.now());
         if (s.warns_fecha !== hoy) { s.warns_fecha = hoy; s.warns_hoy = 0; }
         s.warns_hoy++; markDirty(key);
-        msgBox(`⚠️ WARN`, [`${target ? target.name : s.nombre_actual} (${s.warns_hoy}/${CONFIG.WARN_MAX})`, `${m}`], COLORES.advertencia, "small-bold", 2, p.id);
+        msgBox(`⚠️ Warn`, [`${target ? target.name : s.nombre_actual} (${s.warns_hoy}/${CONFIG.WARN_MAX})`, `${m}`], COLORES.advertencia, "small-bold", 2, p.id);
         auditLog(p, "WARN", target?.name || s.nombre_actual, m);
         if (s.warns_hoy >= CONFIG.WARN_MAX) {
             aplicarBanGlobal(key, CONFIG.BAN_DIAS_LOW * 86400000);
@@ -2290,11 +2427,11 @@ const commands = {
             if (target) STATE.room.kickPlayer(target.id, `⛔ Baneado ${CONFIG.BAN_DIAS_LOW}d por warns`, false);
         }
     },
-    "!desadv": (p, args) => { if (!puedeUsar(p, "!desadv")) return msgError("Sin permiso", p.id); const k = findPlayerKeyByName(args.join(" ")); if (!k || !STATE.baseDatos[k]) return msgError("No encontrado", p.id); STATE.baseDatos[k].warns_hoy = 0; markDirty(k); msgSuccess(`Warn removido`, p.id); },
-    "!listaneg": (p, args) => { if (!puedeUsar(p, "!listaneg")) return msgError("Sin permiso", p.id); const { target, key } = resolverJugadorYResto(args); if (!key || !STATE.baseDatos[key]) return msgError("No encontrado", p.id); if (!actorSuperaKey(p, key)) return msgError("No podés listar a alguien de rango igual o mayor", p.id); setBlacklistGlobal(key, true); if (target) STATE.room.kickPlayer(target.id, "🚫 Lista negra", false); msgBox("🚫 Lista negra", [`${STATE.baseDatos[key].nombre_actual} agregado`], COLORES.error, "small-bold", 2, p.id); auditLog(p, "BLACKLIST", STATE.baseDatos[key].nombre_actual); },
-    "!quitveto": (p, args) => { if (!puedeUsar(p, "!quitveto")) return msgError("Sin permiso", p.id); const k = findPlayerKeyByName(args.join(" ")); if (!k || !STATE.baseDatos[k]) return msgError("No encontrado", p.id); setBlacklistGlobal(k, false); msgSuccess(`${STATE.baseDatos[k].nombre_actual} salió de lista negra`, p.id); auditLog(p, "UNBLACKLIST", STATE.baseDatos[k].nombre_actual); },
+    "!desadv": (p, args) => { if (!puedeUsar(p, "!desadv")) return msgError("Sin permiso.", p.id); const k = findPlayerKeyByName(args.join(" ")); if (!k || !STATE.baseDatos[k]) return msgError("No encontrado.", p.id); STATE.baseDatos[k].warns_hoy = 0; markDirty(k); msgSuccess("Warn removido.", p.id); },
+    "!listaneg": (p, args) => { if (!puedeUsar(p, "!listaneg")) return msgError("Sin permiso.", p.id); const { target, key } = resolverJugadorYResto(args); if (!key || !STATE.baseDatos[key]) return msgError("No encontrado.", p.id); if (!actorSuperaKey(p, key)) return msgError("No podés listar a alguien de rango igual o mayor.", p.id); setBlacklistGlobal(key, true); if (target) STATE.room.kickPlayer(target.id, "🚫 Lista negra", false); msgBox("🚫 Lista negra", [`${STATE.baseDatos[key].nombre_actual} agregado.`], COLORES.error, "small-bold", 2, p.id); auditLog(p, "BLACKLIST", STATE.baseDatos[key].nombre_actual); },
+    "!quitveto": (p, args) => { if (!puedeUsar(p, "!quitveto")) return msgError("Sin permiso.", p.id); const k = findPlayerKeyByName(args.join(" ")); if (!k || !STATE.baseDatos[k]) return msgError("No encontrado.", p.id); setBlacklistGlobal(k, false); msgSuccess(`${STATE.baseDatos[k].nombre_actual} salió de lista negra.`, p.id); auditLog(p, "UNBLACKLIST", STATE.baseDatos[k].nombre_actual); },
     "!dar": (p, args) => {
-        if (args.length < 2) return msgError("Uso: !dar [vip/supervip/ultravip/mod/modplus/admin/coowner] [jugador] (perma/[días])", p.id);
+        if (args.length < 2) return msgError("Uso: !dar [vip/supervip/ultravip/mod/modplus/admin/coowner] [jugador] (perma/[días]).", p.id);
         const tipo = args[0].toLowerCase();
         const dT = args[args.length - 1].toLowerCase();
         const esP = dT === "perma";
@@ -2302,7 +2439,7 @@ const commands = {
         const tD = esP || (dC && dC > 0);
         const nA = tD ? args.slice(1, -1) : args.slice(1);
         const target = findOnlinePlayer(nA.join(" "));
-        if (!target) return msgError("No encontrado", p.id);
+        if (!target) return msgError("No encontrado.", p.id);
         const key = getPlayerKey(target);
         if (esKeyAnonima(key)) return msgError(`${target.name} no tiene auth. No se puede dar VIP/rango.`, p.id);
         const s = STATE.baseDatos[key];
@@ -2310,54 +2447,54 @@ const commands = {
         const TV = { vip: "vip", supervip: "super_vip", super_vip: "super_vip", ultravip: "ultra_vip", ultra_vip: "ultra_vip" };
         if (TV[tipo]) {
             const tk = TV[tipo];
-            if (!["admin", "coowner", "owner"].includes(ra)) return msgError("Solo admins+", p.id);
-            if (esP && !["coowner", "owner"].includes(ra)) return msgError("Perma solo owner/co-owner", p.id);
+            if (![RANGOS.ADMIN, RANGOS.COOWNER, RANGOS.OWNER].includes(ra)) return msgError("Solo admins.", p.id);
+            if (esP && ![RANGOS.COOWNER, RANGOS.OWNER].includes(ra)) return msgError("Perma solo owner/co-owner.", p.id);
             const d = dC && dC > 0 ? Math.min(dC, 3650) : 14;
             s.vip = true; s.vip_tier = tk; s.vip_perma = esP; s.vip_expira = esP ? null : Date.now() + d * 86400000;
             markDirty(key);
             const ti = CONFIG.VIP_TIERS[tk];
-            msgBox(`${ti.emoji} ¡${ti.nombre}!`, [`${target.name}`, esP ? "Permanente" : `${d} día${d === 1 ? "" : "s"}`], 0x00FFFF, "small-bold", 2, p.id);
+            msgBox(`${ti.emoji} ${ti.nombre}`, [`${target.name}`, esP ? "Permanente" : `${d} día${d === 1 ? "" : "s"}`], 0x00FFFF, "small-bold", 2, p.id);
             auditLog(p, "GRANT_VIP", target.name, `${tk}${esP ? " perma" : ` ${d}d`}`);
         } else if (tipo === "mod" || tipo === "modplus") {
-            if (!["admin", "coowner", "owner"].includes(ra)) return msgError("Solo admins+", p.id);
-            s.rango = tipo === "modplus" ? "modplus" : "mod"; markDirty(key);
-            msgBox("🛡️ Nuevo staff", [`${target.name} ahora es ${tipo === "modplus" ? "MOD+" : "MOD"}`], COLORES.info, "small-bold", 2, p.id);
+            if (![RANGOS.ADMIN, RANGOS.COOWNER, RANGOS.OWNER].includes(ra)) return msgError("Solo admins.", p.id);
+            s.rango = tipo === "modplus" ? RANGOS.MODPLUS : RANGOS.MOD; markDirty(key);
+            msgBox("🛡️ Nuevo staff", [`${target.name} ahora es ${tipo === "modplus" ? "MOD+" : "MOD"}.`], COLORES.info, "small-bold", 2, p.id);
             auditLog(p, "GRANT_RANK", target.name, tipo);
         } else if (tipo === "admin") {
-            if (!["coowner", "owner"].includes(ra)) return msgError("Solo owner/co-owner", p.id);
-            s.rango = "admin"; markDirty(key);
+            if (![RANGOS.COOWNER, RANGOS.OWNER].includes(ra)) return msgError("Solo owner/co-owner.", p.id);
+            s.rango = RANGOS.ADMIN; markDirty(key);
             msgBox("🛠 Nuevo admin", [`${target.name}`], COLORES.oro, "small-bold", 2, p.id);
-            auditLog(p, "GRANT_RANK", target.name, "admin");
+            auditLog(p, "GRANT_RANK", target.name, RANGOS.ADMIN);
         } else if (tipo === "coowner") {
-            if (ra !== "owner") return msgError("Solo owner", p.id);
-            s.rango = "coowner"; markDirty(key);
+            if (ra !== RANGOS.OWNER) return msgError("Solo owner.", p.id);
+            s.rango = RANGOS.COOWNER; markDirty(key);
             msgBox("✨ Nuevo co-owner", [`${target.name}`], 0xDA70D6, "small-bold", 2, p.id);
-            auditLog(p, "GRANT_RANK", target.name, "coowner");
-        } else return msgError("Tipo inválido", p.id);
+            auditLog(p, "GRANT_RANK", target.name, RANGOS.COOWNER);
+        } else return msgError("Tipo inválido.", p.id);
     },
     "!darmon": (p, args) => {
-        if (!esOwner(p)) return msgError("Solo owner", p.id);
-        if (args.length < 2) return msgError("Uso: !darmon [jugador] [cantidad]", p.id);
+        if (!esOwner(p)) return msgError("Solo owner.", p.id);
+        if (args.length < 2) return msgError("Uso: !darmon [jugador] [cantidad].", p.id);
         const c = parseInt(args[args.length - 1], 10);
-        if (!validarCantidad(c, 1)) return msgError("Cantidad inválida", p.id);
+        if (!validarCantidad(c, 1)) return msgError("Cantidad inválida.", p.id);
         const { target, key: tk } = resolverJugadorYResto(args.slice(0, -1));
-        if (!tk) return msgError("No encontrado", p.id);
+        if (!tk) return msgError("No encontrado.", p.id);
         if (esKeyAnonima(tk)) return msgError("Ese jugador no tiene auth.", p.id);
         const s = STATE.baseDatos[tk];
         s.monedas += c; markDirty(tk);
-        if (target) msgSuccess(`💰 Recibiste ${c} monedas`, target.id);
-        msgSuccess(`Le diste ${c}💰 a ${s.nombre_actual}`, p.id);
+        if (target) msgSuccess(`Recibiste ${c} monedas.`, target.id);
+        msgSuccess(`Le diste ${c} 💰 a ${s.nombre_actual}.`, p.id);
         auditLog(p, "GIVE_COINS", s.nombre_actual, String(c));
     },
     "!darmoneda": (p, args) => commands["!darmon"](p, args),
     "!darelo": (p, args) => {
-        if (!esOwner(p)) return msgError("Solo owner", p.id);
-        if (args.length < 2) return msgError("Uso: !darelo [jugador] [cantidad]", p.id);
+        if (!esOwner(p)) return msgError("Solo owner.", p.id);
+        if (args.length < 2) return msgError("Uso: !darelo [jugador] [cantidad].", p.id);
         const c = parseInt(args[args.length - 1], 10);
-        if (Number.isNaN(c) || c === 0) return msgError("Cantidad inválida", p.id);
+        if (Number.isNaN(c) || c === 0) return msgError("Cantidad inválida.", p.id);
         const { target, key: tk } = resolverJugadorYResto(args.slice(0, -1));
-        if (!tk) return msgError("No encontrado", p.id);
-        const s = STATE.baseDatos[tk]; if (!s) return msgError("Sin perfil", p.id);
+        if (!tk) return msgError("No encontrado.", p.id);
+        const s = STATE.baseDatos[tk]; if (!s) return msgError("Sin perfil.", p.id);
         const ant = s.mmr || 1000;
         s.mmr = Math.max(0, ant + c);
         if (c < 0 && s.peak_elo > s.mmr) s.peak_elo = s.mmr;
@@ -2369,111 +2506,118 @@ const commands = {
         auditLog(p, "ADJUST_ELO", s.nombre_actual, `${sg}${c}`);
     },
     "!quitar": (p, args) => {
-        if (args.length < 2) return msgError("Uso: !quitar [vip/mod/modplus/admin/coowner] [jugador]", p.id);
+        if (args.length < 2) return msgError("Uso: !quitar [vip/mod/modplus/admin/coowner] [jugador].", p.id);
         const tipo = args[0].toLowerCase(), nom = args.slice(1).join(" ");
         const target = findOnlinePlayer(nom);
         const key = target ? getPlayerKey(target) : findPlayerKeyByName(nom);
-        if (!key || !STATE.baseDatos[key]) return msgError("No encontrado", p.id);
+        if (!key || !STATE.baseDatos[key]) return msgError("No encontrado.", p.id);
         const s = STATE.baseDatos[key], ra = getRango(p);
-        if (tipo === "vip") { if (!["admin", "coowner", "owner"].includes(ra)) return msgError("Solo admins+", p.id); s.vip = false; s.vip_perma = false; s.vip_expira = null; s.vip_tier = "vip"; }
-        else if (tipo === "coowner") { if (ra !== "owner") return msgError("Solo owner", p.id); s.rango = "normal"; }
-        else if (["mod", "modplus", "admin"].includes(tipo)) { if (!["coowner", "owner"].includes(ra)) return msgError("Solo owner/co-owner", p.id); s.rango = "normal"; }
-        else return msgError("Tipo inválido", p.id);
+        if (tipo === "vip") { if (![RANGOS.ADMIN, RANGOS.COOWNER, RANGOS.OWNER].includes(ra)) return msgError("Solo admins.", p.id); s.vip = false; s.vip_perma = false; s.vip_expira = null; s.vip_tier = "vip"; }
+        else if (tipo === "coowner") { if (ra !== RANGOS.OWNER) return msgError("Solo owner.", p.id); s.rango = RANGOS.NORMAL; }
+        else if (["mod", "modplus", "admin"].includes(tipo)) { if (![RANGOS.COOWNER, RANGOS.OWNER].includes(ra)) return msgError("Solo owner/co-owner.", p.id); s.rango = RANGOS.NORMAL; }
+        else return msgError("Tipo inválido.", p.id);
         markDirty(key);
-        msgSuccess(`Se le sacó ${tipo} a ${s.nombre_actual}`, p.id);
+        msgSuccess(`Se le quitó ${tipo} a ${s.nombre_actual}.`, p.id);
         auditLog(p, "REVOKE", s.nombre_actual, tipo);
     },
-    "!votexp": (p, args) => { const { target } = resolverJugadorYResto(args); if (!target) return msgError("Uso: !votexp [jugador]", p.id); if (esProtegidoDeVoto(target)) return msgError("Protegido (VIP/staff)", p.id); iniciarVotacion("kick30", target, p); },
-    "!votmute": (p, args) => { const { target } = resolverJugadorYResto(args); if (!target) return msgError("Uso: !votmute [jugador]", p.id); if (esProtegidoDeVoto(target)) return msgError("Protegido", p.id); iniciarVotacion("mute30", target, p); },
+    "!votexp": (p, args) => { const { target } = resolverJugadorYResto(args); if (!target) return msgError("Uso: !votexp [jugador].", p.id); if (esProtegidoDeVoto(target)) return msgError("Ese jugador está protegido (VIP/staff).", p.id); iniciarVotacion("kick30", target, p); },
+    "!votmute": (p, args) => { const { target } = resolverJugadorYResto(args); if (!target) return msgError("Uso: !votmute [jugador].", p.id); if (esProtegidoDeVoto(target)) return msgError("Ese jugador está protegido.", p.id); iniciarVotacion("mute30", target, p); },
     "!color": (p, args) => {
         const s = STATE.baseDatos[getPlayerKey(p)];
-        if (!esOwner(p) && !s.vip) return msgError("!color es exclusivo VIP", p.id);
+        if (!esOwner(p) && !s.vip) return msgError("!color es exclusivo VIP.", p.id);
         const hex = (args[0] || "").replace("#", "").toUpperCase();
-        if (!/^[0-9A-F]{6}$/.test(hex)) return msgError("Uso: !color [RRGGBB]", p.id);
+        if (!/^[0-9A-F]{6}$/.test(hex)) return msgError("Uso: !color [RRGGBB].", p.id);
         s.color_nombre = parseInt(hex, 16); markDirty(getPlayerKey(p));
-        msgSuccess(`Color actualizado`, p.id);
+        msgSuccess("Color actualizado.", p.id);
     },
-    "!msgenter": (p, args) => { const s = STATE.baseDatos[getPlayerKey(p)]; if (!s.vip && !esStaff(p)) return msgError("Solo VIP/staff", p.id); const t = args.join(" ").slice(0, 80); if (!t) return msgError("Uso: !msgenter [mensaje]", p.id); s.msg_join = t; markDirty(getPlayerKey(p)); msgSuccess(`Actualizado`, p.id); },
-    "!msgsale": (p, args) => { const s = STATE.baseDatos[getPlayerKey(p)]; if (!s.vip && !esStaff(p)) return msgError("Solo VIP/staff", p.id); const t = args.join(" ").slice(0, 80); if (!t) return msgError("Uso: !msgsale [mensaje]", p.id); s.msg_leave = t; markDirty(getPlayerKey(p)); msgSuccess(`Actualizado`, p.id); },
-    "!infovip": (p) => { const t = CONFIG.VIP_TIERS; sendAnnouncement(`3 tiers: color, msgenter/msgsale, festejos, x1.5 goles\n\n🥉 VIP tamaño ${t.vip.min}-${t.vip.max} azul\n🥈 Super ${t.super_vip.min}-${t.super_vip.max} cian\n👑 Ultra ${t.ultra_vip.min}-${t.ultra_vip.max} fuego\n\n⚡ ${CONFIG.DISCORD_INVITE}`, p.id, 0x00FFFF, "small", 0); },
-    "!ayuda": (p) => { sendAnnouncement(`📖 Guía\n!perfil · !tienda · !clan · !tabla · !figuras\nCompleta: !comandos`, p.id, 0xFFFFFF, "small-bold", 0); },
+    "!msgenter": (p, args) => { const s = STATE.baseDatos[getPlayerKey(p)]; if (!s.vip && !esStaff(p)) return msgError("Solo VIP/staff.", p.id); const t = args.join(" ").slice(0, 80); if (!t) return msgError("Uso: !msgenter [mensaje].", p.id); s.msg_join = t; markDirty(getPlayerKey(p)); msgSuccess("Mensaje de entrada actualizado.", p.id); },
+    "!msgsale": (p, args) => { const s = STATE.baseDatos[getPlayerKey(p)]; if (!s.vip && !esStaff(p)) return msgError("Solo VIP/staff.", p.id); const t = args.join(" ").slice(0, 80); if (!t) return msgError("Uso: !msgsale [mensaje].", p.id); s.msg_leave = t; markDirty(getPlayerKey(p)); msgSuccess("Mensaje de salida actualizado.", p.id); },
+    "!infovip": (p) => { const t = CONFIG.VIP_TIERS; sendAnnouncement(`3 tiers: color, mensajes de entrada/salida, festejos, x1.5 goles.\n\n🥉 VIP: tamaño ${t.vip.min}-${t.vip.max} (azul)\n🥈 Super VIP: ${t.super_vip.min}-${t.super_vip.max} (cian)\n👑 Ultra VIP: ${t.ultra_vip.min}-${t.ultra_vip.max} (fuego)\n\n⚡ ${CONFIG.DISCORD_INVITE}`, p.id, 0x00FFFF, "small-bold", 0); },
+    "!ayuda": (p) => {
+        msgCaja("📖 Ayuda rápida", [
+            "Perfil y stats    →  !perfil",
+            "Tienda e ítems    →  !tienda",
+            "Clanes            →  !clan",
+            "Rankings          →  !tabla · !goles · !figuras",
+            "Lista completa    →  !comandos",
+        ], COLORES.info, "small-bold", 0, p.id);
+    },
     "!gk": (p) => {
-        if (p.team === 0) return msgError("Entrá a un equipo primero", p.id);
+        if (p.team === 0) return msgError("Entrá a un equipo primero.", p.id);
         const act = STATE.gkReservado[p.team];
-        if (act && act !== p.id) { const j = STATE.room.getPlayer(act); if (j && j.team === p.team) return msgError("Ya tenés arquero", p.id); STATE.gkReservado[p.team] = null; }
+        if (act && act !== p.id) { const j = STATE.room.getPlayer(act); if (j && j.team === p.team) return msgError("Ya hay un arquero reservado en tu equipo.", p.id); STATE.gkReservado[p.team] = null; }
         if (act === p.id) return;
         STATE.gkReservado[p.team] = p.id;
         aplicarTamanoPersistente(p);
-        msgMini(`🧤 ${p.name} se puso los guantes`, p.id, COLORES.info, 1);
+        msgSmall(`🧤 ${p.name} ahora es arquero`, null, COLORES.info, "small", 1);
     },
     "!salirarquero": (p) => dejarArquero(p),
     "!capitanes": (p) => {
-        if (!STATE.partidoEnCurso) return msgError("No hay partido", p.id);
+        if (!STATE.partidoEnCurso) return msgError("No hay partido en curso.", p.id);
         const n = (t) => { const id = STATE.capitanes[t]; const j = id != null ? STATE.room.getPlayer(id) : null; return j ? j.name : "—"; };
         msgBox(`${CONFIG.CAPITAN_AVATAR} Capitanes`, [`🔴 ${n(1)}`, `🔵 ${n(2)}`], COLORES.oro, "small-bold", 0, p.id);
     },
     "!capitan": (p, args, isA) => {
-        if (!esAdminEfectivo(p, isA)) return msgError("Solo admins", p.id);
-        if (!STATE.partidoEnCurso) return msgError("Solo con partido", p.id);
-        if (!args.length) return msgError("Uso: !capitan [jugador]", p.id);
+        if (!esAdminEfectivo(p, isA)) return msgError("Solo admins.", p.id);
+        if (!STATE.partidoEnCurso) return msgError("Solo se puede con partido en curso.", p.id);
+        if (!args.length) return msgError("Uso: !capitan [jugador].", p.id);
         const t = findOnlinePlayer(args.join(" "));
-        if (!t) return msgError("No encontrado", p.id);
-        if (t.team !== 1 && t.team !== 2) return msgError("No está en equipo", p.id);
+        if (!t) return msgError("No encontrado.", p.id);
+        if (t.team !== 1 && t.team !== 2) return msgError("Ese jugador no está en un equipo.", p.id);
         const team = t.team;
-        if (STATE.capitanes[team] === t.id) return msgError("Ya es capitán", p.id);
+        if (STATE.capitanes[team] === t.id) return msgError("Ya es capitán.", p.id);
         if (STATE.capitanes[team] != null) marcarCapitan(STATE.capitanes[team], false);
         STATE.capitanes[team] = t.id;
         marcarCapitan(t.id, true);
-        msgSmall(`${CONFIG.CAPITAN_AVATAR} ${t.name} capitán del ${team === 1 ? "rojo 🔴" : "azul 🔵"} (por ${p.name})`, null, team === 1 ? COLORES.equipo_rojo : COLORES.equipo_azul, "small-bold", 1);
+        msgSmall(`${CONFIG.CAPITAN_AVATAR} ${t.name} es capitán del ${team === 1 ? "rojo 🔴" : "azul 🔵"} (por ${p.name})`, null, team === 1 ? COLORES.equipo_rojo : COLORES.equipo_azul, "small-bold", 1);
     },
-    "!bb": (p) => { sendAnnouncement(`👋 ${p.name} se despidió (!bb)`, null, COLORES.advertencia, "small-bold", 1); STATE.salidasVoluntarias.add(p.id); STATE.room.kickPlayer(p.id, "👋 ¡Bye bye!", false); },
-    "!nv": (p) => { sendAnnouncement(`👋 ${p.name} se despidió (!nv)`, null, COLORES.advertencia, "small-bold", 1); STATE.salidasVoluntarias.add(p.id); STATE.room.kickPlayer(p.id, "👋 ¡Nos vemos!", false); },
+    "!bb": (p) => { sendAnnouncement(`👋 ${p.name} se despidió`, null, COLORES.advertencia, "small-bold", 1); STATE.salidasVoluntarias.add(p.id); STATE.room.kickPlayer(p.id, "👋 ¡Bye bye!", false); },
+    "!nv": (p) => { sendAnnouncement(`👋 ${p.name} se despidió`, null, COLORES.advertencia, "small-bold", 1); STATE.salidasVoluntarias.add(p.id); STATE.room.kickPlayer(p.id, "👋 ¡Nos vemos!", false); },
     "!mapa": (p, args, isA) => {
         if (!esAdminEfectivo(p, isA)) return;
         const n = (args[0] || "").toLowerCase();
-        if (!MAPAS[n]) return msgError(`Mapas: ${Object.keys(MAPAS).join(", ")}`, p.id);
+        if (!MAPAS[n]) return msgError(`Mapas disponibles: ${Object.keys(MAPAS).join(", ")}.`, p.id);
         STATE.automatizadoActivado = false; STATE.bracketFijo = null;
         const sc = STATE.room.getScores();
         cambiarMapa(n, sc?.scoreLimit || 3, sc?.timeLimit || 5);
-        msgSuccess(`Mapa: ${n}`, p.id);
+        msgSuccess(`Mapa: ${n}.`, p.id);
     },
     "!swapcol": (p, args, isA) => {
         if (!esAdminEfectivo(p, isA)) return;
-        if (!STATE.ultimasCamisetas) return msgError("Sin camisetas", p.id);
+        if (!STATE.ultimasCamisetas) return msgError("No hay camisetas asignadas.", p.id);
         const { cam1, cam2 } = STATE.ultimasCamisetas;
         safeOperation(() => { STATE.room.setTeamColors(1, cam2.angle ?? 90, textoContrasteCamiseta(cam2.colors[0]), cam2.colors); STATE.room.setTeamColors(2, cam1.angle ?? 90, textoContrasteCamiseta(cam1.colors[0]), cam1.colors); });
         STATE.ultimasCamisetas = { cam1: cam2, cam2: cam1 };
         if (STATE.rainbowEquipoActivo) { restaurarCamisetaEquipo(STATE.rainbowEquipoActivo.team, STATE.rainbowEquipoActivo.colorOriginal); STATE.rainbowEquipoActivo = null; }
-        msgSmall("🔄 Camisetas intercambiadas", p.id, COLORES.oro, "small-bold", 1);
+        msgSmall("🔄 Camisetas intercambiadas.", p.id, COLORES.oro, "small-bold", 1);
     },
     "!liga": (p, args, isA) => {
         if (!esAdminEfectivo(p, isA)) return;
-        if (args.length < 2) return msgError("Uso: !liga [club] [red/blue]", p.id);
+        if (args.length < 2) return msgError("Uso: !liga [club] [red/blue].", p.id);
         const eq = args[args.length - 1].toLowerCase();
-        if (eq !== "red" && eq !== "blue") return msgError("'red' o 'blue'", p.id);
+        if (eq !== "red" && eq !== "blue") return msgError("Usá 'red' o 'blue'.", p.id);
         const nc = args.slice(0, -1).join(" ").toLowerCase();
         const club = CAMISETAS.find(c => c.name.toLowerCase() === nc || c.name.toLowerCase().includes(nc));
-        if (!club) return msgError(`No tengo esa. Probá: ${CAMISETAS.map(c => c.name).join(", ")}`, p.id);
+        if (!club) return msgError(`No encontré ese club. Probá: ${CAMISETAS.map(c => c.name).join(", ")}`, p.id);
         const tid = eq === "red" ? 1 : 2;
         safeOperation(() => STATE.room.setTeamColors(tid, club.angle ?? 90, textoContrasteCamiseta(club.colors[0]), club.colors));
         if (!STATE.ultimasCamisetas) STATE.ultimasCamisetas = { cam1: club, cam2: club };
         if (tid === 1) STATE.ultimasCamisetas.cam1 = club; else STATE.ultimasCamisetas.cam2 = club;
-        msgSmall(`🎽 ${eq} ahora con la de ${club.name}`, p.id, COLORES.oro, "small-bold", 1);
+        msgSmall(`🎽 ${eq} ahora con la de ${club.name}.`, p.id, COLORES.oro, "small-bold", 1);
     },
     // FIX #7: si el owner tipea un tier, se SUBE el tier (no se apaga el VIP).
-    // Antes sólo toggleaba, así que no había forma de promover un VIP vivo.
     "!vip": (p, args) => {
-        if (!esOwner(p)) return msgError("Solo owner", p.id);
-        if (!args.length) return msgError("Uso: !vip [jugador] (tier)", p.id);
+        if (!esOwner(p)) return msgError("Solo owner.", p.id);
+        if (!args.length) return msgError("Uso: !vip [jugador] (tier).", p.id);
         const TV = { vip: "vip", supervip: "super_vip", super_vip: "super_vip", ultravip: "ultra_vip", ultra_vip: "ultra_vip" };
         const ult = args[args.length - 1].toLowerCase();
         const tp = TV[ult];
         const nA = tp ? args.slice(0, -1) : args;
         const t = findOnlinePlayer(nA.join(" "));
-        if (!t) return msgError("No encontrado", p.id);
+        if (!t) return msgError("No encontrado.", p.id);
         const key = getPlayerKey(t), s = STATE.baseDatos[key];
         if (esKeyAnonima(key)) return msgError(`${t.name} no tiene auth.`, p.id);
-        if (!s) return msgError("Sin perfil", p.id);
+        if (!s) return msgError("Sin perfil.", p.id);
         if (tp) {
             s.vip = true;
             s.vip_tier = tp;
@@ -2482,22 +2626,18 @@ const commands = {
         }
         markDirty(key);
         const ti = CONFIG.VIP_TIERS[s.vip_tier] || CONFIG.VIP_TIERS.vip;
-        msgSmall(s.vip ? `${ti.emoji} ${t.name} es ${ti.nombre}` : `${t.name} ya no es VIP`, p.id, 0x00FFFF, "small-bold", 1);
+        msgSmall(s.vip ? `${ti.emoji} ${t.name} es ${ti.nombre}.` : `${t.name} ya no es VIP.`, p.id, 0x00FFFF, "small-bold", 1);
     },
     // FIX #9: además de liberar el nombre, kickear al impostor conectado.
-    // Antes quedaba en la sala con la key ya borrada de baseDatos — sus
-    // stats desaparecían pero seguía jugando hasta el próximo leave.
     "!liberarnombre": (p, args) => {
-        if (!esOwner(p)) return msgError("Solo owner", p.id);
-        if (!args.length) return msgError("Uso: !liberarnombre [nombre]", p.id);
+        if (!esOwner(p)) return msgError("Solo owner.", p.id);
+        if (!args.length) return msgError("Uso: !liberarnombre [nombre].", p.id);
         const nv = args.join(" ");
         const lk = `anon_${nv.toLowerCase().trim().replace(/\s+/g, "_")}`;
         const lg = STATE.baseDatos[lk];
-        if (!lg) return msgError(`No existe "${nv}"`, p.id);
-        if (!lg._reclamado || !lg._reclamadoPor) return msgError(`"${nv}" ya está libre`, p.id);
+        if (!lg) return msgError(`No existe "${nv}".`, p.id);
+        if (!lg._reclamado || !lg._reclamadoPor) return msgError(`"${nv}" ya está libre.`, p.id);
         const imp = lg._reclamadoPor;
-        // Si el impostor todavía está conectado, sacarlo de la sala antes de
-        // borrar su perfil — si no, queda operando con una key fantasma.
         const impostorPl = STATE.room.getPlayerList().find(pl => getPlayerKey(pl) === imp);
         if (impostorPl) safeOperation(() => STATE.room.kickPlayer(impostorPl.id, "🔓 Ese nombre fue liberado por el dueño", false));
         delete STATE.baseDatos[imp];
@@ -2506,78 +2646,107 @@ const commands = {
         lg._reclamado = false; delete lg._reclamadoPor;
         markDirty(lk);
         logMsg('security.log', `[${ROOM_ID}] Nombre liberado: "${nv}" por ${p.name}`);
-        msgSuccess(`"${nv}" quedó libre`, p.id);
+        msgSuccess(`"${nv}" quedó libre.`, p.id);
     },
     "!liberarreserva": (p, args) => {
-        if (!esOwner(p)) return msgError("Solo owner", p.id);
-        if (!args.length) return msgError("Uso: !liberarreserva [nombre]", p.id);
+        if (!esOwner(p)) return msgError("Solo owner.", p.id);
+        if (!args.length) return msgError("Uso: !liberarreserva [nombre].", p.id);
         const nn = args.join(" ").toLowerCase().trim();
-        if (!STATE.nombresReservados.has(nn)) return msgError(`"${args.join(" ")}" no está reservado`, p.id);
+        if (!STATE.nombresReservados.has(nn)) return msgError(`"${args.join(" ")}" no está reservado.`, p.id);
         const du = STATE.nombresReservados.get(nn);
         STATE.nombresReservados.delete(nn);
         liberarNombreReservado(nn);
         logMsg('security.log', `[${ROOM_ID}] Reserva liberada: "${nn}" (era ${du}) por ${p.name}`);
-        msgSuccess(`"${args.join(" ")}" quedó libre`, p.id);
+        msgSuccess(`"${args.join(" ")}" quedó libre.`, p.id);
     },
     "!addadmin": (p, args) => {
-        if (!esOwner(p)) return msgError("Solo owner", p.id);
+        if (!esOwner(p)) return msgError("Solo owner.", p.id);
         const auth = (args[0] || "").trim();
-        if (!auth) return msgError("Uso: !addadmin [auth]", p.id);
-        if (STATE.adminsAutomaticos.has(auth)) return msgError("Ya está en la lista", p.id);
+        if (!auth) return msgError("Uso: !addadmin [auth].", p.id);
+        if (STATE.adminsAutomaticos.has(auth)) return msgError("Ya está en la lista.", p.id);
         STATE.adminsAutomaticos.add(auth);
         agregarAdminAuto(auth, p.name, ROOM_ID);
         const on = STATE.room.getPlayerList().find(pl => STATE.authPorId.get(pl.id) === auth);
         if (on) {
             safeOperation(() => STATE.room.setPlayerAdmin(on.id, true));
             const sy = STATE.baseDatos[auth];
-            if (sy && JERARQUIA_RANGOS.indexOf(sy.rango || "normal") < JERARQUIA_RANGOS.indexOf("admin")) { sy.rango = "admin"; markDirty(auth); }
+            if (sy && JERARQUIA_RANGOS.indexOf(sy.rango || RANGOS.NORMAL) < JERARQUIA_RANGOS.indexOf(RANGOS.ADMIN)) { sy.rango = RANGOS.ADMIN; markDirty(auth); }
         }
-        msgSuccess(`Admin auto agregado: ${auth}`, p.id);
+        msgSuccess(`Admin automático agregado: ${auth}.`, p.id);
         auditLog(p, "ADD_ADMIN", auth);
     },
     "!deladmin": (p, args) => {
-        if (!esOwner(p)) return msgError("Solo owner", p.id);
+        if (!esOwner(p)) return msgError("Solo owner.", p.id);
         const auth = (args[0] || "").trim();
-        if (!auth) return msgError("Uso: !deladmin [auth]", p.id);
-        if (!STATE.adminsAutomaticos.has(auth)) return msgError("No está en la lista", p.id);
+        if (!auth) return msgError("Uso: !deladmin [auth].", p.id);
+        if (!STATE.adminsAutomaticos.has(auth)) return msgError("No está en la lista.", p.id);
         STATE.adminsAutomaticos.delete(auth);
         quitarAdminAuto(auth);
         const c = STATE.room.getPlayerList().find(pl => STATE.authPorId.get(pl.id) === auth);
         if (c) safeOperation(() => STATE.room.setPlayerAdmin(c.id, false));
-        msgSuccess(`Admin auto quitado: ${auth}`, p.id);
+        msgSuccess(`Admin automático quitado: ${auth}.`, p.id);
         auditLog(p, "DEL_ADMIN", auth);
     },
     "!listadmins": (p) => {
-        if (!esOwner(p)) return msgError("Solo owner", p.id);
-        if (!STATE.adminsAutomaticos.size) return msgSuccess("Sin admins automáticos", p.id);
-        msgCaja("👑 Admins automáticos", [...STATE.adminsAutomaticos].map(auth => { const s = STATE.baseDatos[auth]; const on = STATE.room.getPlayerList().some(pl => STATE.authPorId.get(pl.id) === auth); return `${s?.nombre_actual || auth} ${on ? "🟢" : "⚪"}`; }), COLORES.oro, "small", 0, p.id);
+        if (!esOwner(p)) return msgError("Solo owner.", p.id);
+        if (!STATE.adminsAutomaticos.size) return msgSuccess("Sin admins automáticos.", p.id);
+        msgCaja("👑 Admins automáticos", [...STATE.adminsAutomaticos].map(auth => { const s = STATE.baseDatos[auth]; const on = STATE.room.getPlayerList().some(pl => STATE.authPorId.get(pl.id) === auth); return `${s?.nombre_actual || auth} ${on ? "🟢" : "⚪"}`; }), COLORES.oro, "small-bold", 0, p.id);
     },
-    "!contrasena": (p, args, isA) => { if (!esAdminEfectivo(p, isA)) return; if (!args[0] || args[0].toLowerCase() === "off") { safeOperation(() => STATE.room.setPassword(null)); return msgSuccess("Contraseña desactivada", p.id); } safeOperation(() => STATE.room.setPassword(args.join(" "))); msgSuccess(`Contraseña activada`, p.id); },
+    "!contrasena": (p, args, isA) => { if (!esAdminEfectivo(p, isA)) return; if (!args[0] || args[0].toLowerCase() === "off") { safeOperation(() => STATE.room.setPassword(null)); return msgSuccess("Contraseña desactivada.", p.id); } safeOperation(() => STATE.room.setPassword(args.join(" "))); msgSuccess("Contraseña activada.", p.id); },
     "!temporada": (p, args, isA) => {
         if (!esAdminEfectivo(p, isA)) return;
         const ent = Object.entries(STATE.baseDatos).sort((a, b) => (b[1].mmr || 1000) - (a[1].mmr || 1000)).slice(0, 3);
-        if (!ent.length) return msgError("Sin jugadores", p.id);
+        if (!ent.length) return msgError("Sin jugadores.", p.id);
         STATE.campeones.push({ temporada: STATE.TEMPORADA_ACTUAL, top: ent.map(([, s]) => ({ nombre: s.nombre_actual, mmr: s.mmr })), fecha: Date.now() });
         ent.forEach(([k, s]) => { s.campeonatos = s.campeonatos || []; s.campeonatos.push(STATE.TEMPORADA_ACTUAL); darBadgePorKey(k, "campeon", s.nombre_actual); });
         Object.entries(STATE.baseDatos).forEach(([k, s]) => { s.mmr = Math.round(1000 + (s.mmr - 1000) * 0.5); s.temporada = STATE.TEMPORADA_ACTUAL + 1; actualizarTitulo(k, true); });
         STATE.TEMPORADA_ACTUAL++;
-        msgCaja(`🏆 ¡Arrancó Temporada ${STATE.TEMPORADA_ACTUAL}!`, [`👑 Campeones: ${ent.map(([, s]) => s.nombre_actual).join(", ")}`, `🔄 ELO comprimido`], COLORES.oro, "bold", 2, null);
+        msgCaja(`🏆 Arrancó la Temporada S${STATE.TEMPORADA_ACTUAL}`, [`👑 Campeones: ${ent.map(([, s]) => s.nombre_actual).join(", ")}`, `🔄 ELO comprimido`], COLORES.oro, "bold", 2, null);
         markDirty();
         auditLog(p, "NEW_SEASON", `T${STATE.TEMPORADA_ACTUAL}`, ent.map(([, s]) => s.nombre_actual).join(","));
     },
-    "!records": (p) => { if (!STATE.campeones.length) return msgInfo("Sin campeones aún", p.id); const u = STATE.campeones.slice(-5).reverse(); msgBox("📜 Salón de la fama", u.map(c => `S${c.temporada}: ${c.top.map(t => `${t.nombre}(${t.mmr})`).join(", ")}`), COLORES.oro, "small", 2, p.id); },
-    "!tutorial": (p) => { sendAnnouncement(`📘 CÓMO ARRANCAR:\n1️⃣ !jugar entra a la cancha\n2️⃣ Cada partido suma ELO/monedas/XP\n3️⃣ !perfil para ver stats\n4️⃣ !tienda para gastar\n5️⃣ !clan para fundar\n6️⃣ !misiones objetivo diario\n📜 !comandos lista completa`, p.id, COLORES.info, "small-bold", 0); },
+    "!records": (p) => { if (!STATE.campeones.length) return msgInfo("Sin campeones todavía.", p.id); const u = STATE.campeones.slice(-5).reverse(); msgBox("📜 Salón de la fama", u.map(c => `S${c.temporada}: ${c.top.map(t => `${t.nombre} (${t.mmr})`).join(", ")}`), COLORES.oro, "small-bold", 2, p.id); },
+    "!tutorial": (p) => {
+        msgCaja("📘 Cómo arrancar", [
+            "1)  !jugar         — entrás a la cancha",
+            "2)  Cada partido   — suma ELO, monedas y XP",
+            "3)  !perfil        — mirá tus estadísticas",
+            "4)  !tienda        — gastá las monedas",
+            "5)  !clan          — fundá tu propio clan",
+            "6)  !misiones      — objetivo del día",
+            "",
+            "Lista completa:  !comandos",
+        ], COLORES.info, "small-bold", 0, p.id);
+    },
     "!comandos": (p, args, isA) => {
-        let a = `📜 Comandos\n!jugar !ver !perfil !vs [jug] !tabla !tienda !misiones !figuras\n!goles !asist !figuras !partidos !vallas !horas !monedas !efec\n!enviar !casino !apostar !ruleta !moneda !veintiuno !pedir !plantar !dinero\n!afk !liga [club] !capitanes !votar (💎 !tamano solo VIP)\n!duelo [jug] [monto] !aceptar !rechazar\n!clan crear/invitar/aceptar/salir/info/tabla\n!reportar [jug] [motivo] !records !ids !llamar [motivo]\n🎮 t [msg] equipo · ⚔️ c [msg] clan · @@nombre [msg] privado`;
-        if (esAdminEfectivo(p, isA)) a += `\n\n⚡ Admins\n!iniciar !detener !echar !fueraafk !powershot !curva !rainbow !mapa\n!juegantodos !auto !x2jt !x3jt !x5jt !x6jt !x7jt !x4jt !callar !hablar !fairplay\n!ganasigue !goldeoro !swapcol !capitan [jug] !expulsar !contrasena !temporada\n!reportes !status !admin [ID] !verificar [código] !panel [número]`;
-        sendAnnouncement(a, p.id, COLORES.blanco, "small-bold", 0);
+        const cats = [
+            ["🎮 Partido",   "!jugar · !ver · !equipos · !capitanes · !tiempo"],
+            ["👤 Perfil",    "!perfil · !rango · !vs [jug] · !misiones · !dinero"],
+            ["🏆 Rankings",  "!tabla · !goles · !asist · !figuras · !partidos · !vallas · !atajadas · !horas · !monedas · !efec"],
+            ["🛒 Economía",  "!tienda · !enviar · !casino · !apostar · !ruleta · !moneda · !veintiuno"],
+            ["⚔️ Social",    "!clan · !duelo [jug] [monto] · !aceptar · !rechazar · !reportar · !llamar"],
+            ["💬 Chat",      "t [msg] equipo · c [msg] clan · @@jug [msg] privado"],
+        ];
+        const lines = cats.map(([k, v]) => `${k}\n   ${v}`);
+        let extra = "";
+        if (esAdminEfectivo(p, isA)) {
+            extra = [
+                "🛠 Admin — Moderación",
+                "   !iniciar · !detener · !echar · !fueraafk · !callar · !hablar · !expulsar",
+                "🛠 Admin — Juego",
+                "   !powershot · !curva · !rainbow · !mapa · !juegantodos · !auto · !x2jt..!x7jt",
+                "🛠 Admin — Sistema",
+                "   !status · !admin [jug] · !verificar [código] · !panel [número] · !temporada",
+            ].join("\n");
+        }
+        sendAnnouncement(`📖 Comandos\n\n${lines.join("\n\n")}${extra ? "\n\n" + extra : ""}`, p.id, COLORES.blanco, "small-bold", 0);
     },
     "!status": (p) => {
-        if (!esOwner(p) && !esAdminEfectivo(p, false)) return msgError("Solo admins/owner", p.id);
+        if (!esOwner(p) && !esAdminEfectivo(p, false)) return msgError("Solo admins/owner.", p.id);
         let ps = {}, pg = {};
         try { const x = getPool(); ps = { total: x.totalCount, idle: x.idleCount, waiting: x.waitingCount }; } catch (e) { }
         try { const x = getGlobalPool(); pg = { total: x.totalCount, idle: x.idleCount, waiting: x.waitingCount }; } catch (e) { }
-        msgCaja("🩺 ESTADO DEL BOT", [
+        msgCaja("🩺 Estado del bot", [
             `Sala: ${ROOM_ID} (${CONFIG.NOMBRE_SALA})`,
             `Uptime: ${formatUptime(Date.now() - (STATE.inicioSala || Date.now()))}`,
             `Jugadores: ${STATE.room ? STATE.room.getPlayerList().length : 0}`,
@@ -2587,7 +2756,7 @@ const commands = {
             `Pool global: ${pg.total || 0} (${pg.idle || 0} idle, ${pg.waiting || 0} espera)`,
             `Discord CB: ${DISCORD_CB.abiertoHasta > Date.now() ? "🔴 abierto" : "🟢 cerrado"}`,
             `Retry queue: ${RETRY_QUEUE.length}`,
-        ], COLORES.info, "small", 0, p.id);
+        ], COLORES.info, "small-bold", 0, p.id);
     },
 };
 
@@ -2602,10 +2771,10 @@ for (const [n, c] of Object.entries(BRACKETS_FIJOS_JT)) {
         const ya = STATE.automatizadoActivado && STATE.bracketFijo === bf;
         if (!ya) {
             STATE.automatizadoActivado = true; STATE.bracketFijo = bf; STATE.jueganTodosActivo = true; STATE.fairPlayActivo = false;
-            msgSmall(`✅ ${c.l}: ON`, p.id, COLORES.exito, "small-bold", 1);
+            msgSmall(`✅ ${c.l}: activado.`, p.id, COLORES.exito, "small-bold", 1);
             ejecutarAutomatizado(true);
             if (CONFIG.AUTOMATED_MODE_ANNOUNCE && STATE.room) sendAnnouncement(`⚙️ Modo ${c.l}`, null, COLORES.info, "small", 0);
-        } else { STATE.automatizadoActivado = false; STATE.bracketFijo = null; msgSmall(`❌ ${c.l}: OFF`, p.id, COLORES.error, "small-bold", 1); }
+        } else { STATE.automatizadoActivado = false; STATE.bracketFijo = null; msgSmall(`❌ ${c.l}: desactivado.`, p.id, COLORES.error, "small-bold", 1); }
     };
 }
 commands["!x4jt"] = (p, args, isA) => {
@@ -2613,10 +2782,10 @@ commands["!x4jt"] = (p, args, isA) => {
     const ya = STATE.automatizadoActivado && STATE.bracketFijo === BRACKET_X4_FIJO;
     if (!ya) {
         STATE.automatizadoActivado = true; STATE.bracketFijo = BRACKET_X4_FIJO; STATE.jueganTodosActivo = true; STATE.fairPlayActivo = false;
-        msgSmall("✅ X4: ON", p.id, COLORES.exito, "small-bold", 1);
+        msgSmall("✅ X4: activado.", p.id, COLORES.exito, "small-bold", 1);
         ejecutarAutomatizado(true);
         if (CONFIG.AUTOMATED_MODE_ANNOUNCE && STATE.room) sendAnnouncement("⚙️ Modo X4", null, COLORES.info, "small", 0);
-    } else { STATE.automatizadoActivado = false; STATE.bracketFijo = null; msgSmall("❌ X4: OFF", p.id, COLORES.error, "small-bold", 1); }
+    } else { STATE.automatizadoActivado = false; STATE.bracketFijo = null; msgSmall("❌ X4: desactivado.", p.id, COLORES.error, "small-bold", 1); }
 };
 
 const ACCIONES_ADMIN_MENU = [
@@ -2625,23 +2794,23 @@ const ACCIONES_ADMIN_MENU = [
     { numero: 3, etiqueta: "Mapa x5", accion: (p, isA) => commands["!mapa"](p, ["futx5"], isA) },
     { numero: 4, etiqueta: "Powershot", accion: (p, isA) => commands["!powershot"](p, [], isA) },
     { numero: 5, etiqueta: "Kick AFK", accion: (p, isA) => commands["!fueraafk"](p, [], isA) },
-    { numero: 6, etiqueta: "Balancear", accion: (p, isA) => { const j = STATE.room.getPlayerList().filter(x => x.team !== 0); if (j.length < 2) return msgError("Pocos en cancha", p.id); const { equipo1, equipo2 } = balancearEquiposElo(j); equipo1.forEach(x => STATE.room.setPlayerTeam(x.id, 1)); equipo2.forEach(x => STATE.room.setPlayerTeam(x.id, 2)); msgBox(`⚖️ Balanceados`, [`Por: ${p.name}`], COLORES.exito, "small-bold", 2, p.id); } },
+    { numero: 6, etiqueta: "Balancear", accion: (p, isA) => { const j = STATE.room.getPlayerList().filter(x => x.team !== 0); if (j.length < 2) return msgError("Pocos en cancha.", p.id); const { equipo1, equipo2 } = balancearEquiposElo(j); equipo1.forEach(x => STATE.room.setPlayerTeam(x.id, 1)); equipo2.forEach(x => STATE.room.setPlayerTeam(x.id, 2)); msgBox(`⚖️ Balanceados`, [`Por: ${p.name}`], COLORES.exito, "small-bold", 2, p.id); } },
     { numero: 7, etiqueta: "Auto", accion: (p, isA) => commands["!auto"](p, [], isA) },
 ];
 commands["!menuadm"] = (p, args, isA) => {
-    if (!esAdminEfectivo(p, isA)) return msgError("Solo admins", p.id);
+    if (!esAdminEfectivo(p, isA)) return msgError("Solo admins.", p.id);
     const filas = [];
     for (let i = 0; i < ACCIONES_ADMIN_MENU.length; i += 2) {
         const a = ACCIONES_ADMIN_MENU[i], b = ACCIONES_ADMIN_MENU[i + 1];
         filas.push(b ? `[${a.numero}] ${a.etiqueta}   [${b.numero}] ${b.etiqueta}` : `[${a.numero}] ${a.etiqueta}`);
     }
-    sendAnnouncement(`👑 PANEL — !panel [número]\n${filas.join("\n")}`, p.id, COLORES.oro, "small-bold", 0);
+    sendAnnouncement(`👑 Panel  —  !panel [número]\n${filas.join("\n")}`, p.id, COLORES.oro, "small-bold", 0);
 };
 commands["!panel"] = (p, args, isA) => {
-    if (!esAdminEfectivo(p, isA)) return msgError("Solo admins", p.id);
+    if (!esAdminEfectivo(p, isA)) return msgError("Solo admins.", p.id);
     const num = parseInt(args[0], 10);
     const op = ACCIONES_ADMIN_MENU.find(o => o.numero === num);
-    if (!op) return msgError("Opción inválida", p.id);
+    if (!op) return msgError("Opción inválida.", p.id);
     op.accion(p, isA);
 };
 
@@ -2692,7 +2861,7 @@ function darXP(player, cantidad) {
         let bonus = 0;
         for (let n = s.nivel + 1; n <= nv; n++) bonus += n * 10;
         s.nivel = nv; s.monedas += bonus;
-        msgSmall(`🎉 Subiste a nivel ${nv} (+${bonus}💰)`, player.id, COLORES.oro, "small-bold", 1);
+        msgSmall(`🎉 Subiste a nivel ${nv} (+${bonus} 💰)`, player.id, COLORES.oro, "small-bold", 1);
         if (nv >= 10 && !s.badges.includes("nivel_10")) darBadge(player, "nivel_10");
         if (nv >= 25 && !s.badges.includes("nivel_25")) darBadge(player, "nivel_25");
     }
@@ -2825,7 +2994,7 @@ function otorgarMVP(player) {
     if (s.mvps >= 20 && !s.badges.includes("mvp_20")) darBadge(player, "mvp_20");
     markDirty(k);
     sendAnnouncement(`🌟 MVP: ${player.name}`, null, COLORES.oro, "bold", 1);
-    msgSmall(`🎉 MVP · +${CONFIG.MVP_MONEDAS}💰 +${CONFIG.MVP_XP}XP`, player.id, COLORES.oro, "small-bold", 1);
+    msgSmall(`🎉 MVP · +${CONFIG.MVP_MONEDAS} 💰  +${CONFIG.MVP_XP} XP`, player.id, COLORES.oro, "small-bold", 1);
 }
 function iniciarVotacionMVP(f) { if (f) otorgarMVP(f); }
 
@@ -2866,25 +3035,36 @@ function setupEvents() {
                 }
             }
 
-            if (CONFIG.REQUIRE_AUTH_TO_PLAY && !player.auth && !esOwner(player)) msgWarn("Necesitás cuenta Haxball para jugar", player.id);
+            if (CONFIG.REQUIRE_AUTH_TO_PLAY && !player.auth && !esOwner(player)) msgWarn("Necesitás cuenta Haxball para jugar.", player.id);
             const s = initStats(player);
             if (s.blacklisted) { STATE.room.kickPlayer(player.id, "Estás en lista negra.", false); return; }
             if (s.ban_hasta && Date.now() < s.ban_hasta) { const h = Math.ceil((s.ban_hasta - Date.now()) / 3600000); STATE.room.kickPlayer(player.id, `Baneado. Faltan ${h}h.`, false); return; }
             if (player.auth && STATE.adminsAutomaticos.has(player.auth)) {
                 safeOperation(() => STATE.room.setPlayerAdmin(player.id, true));
-                if (JERARQUIA_RANGOS.indexOf(s.rango || "normal") < JERARQUIA_RANGOS.indexOf("admin")) { s.rango = "admin"; markDirty(getPlayerKey(player)); }
+                if (JERARQUIA_RANGOS.indexOf(s.rango || RANGOS.NORMAL) < JERARQUIA_RANGOS.indexOf(RANGOS.ADMIN)) { s.rango = RANGOS.ADMIN; markDirty(getPlayerKey(player)); }
             }
             const t = obtenerTitulo(player), b = obtenerBadges(player);
             const wr = s.partidos > 0 ? Math.round((s.victorias / s.partidos) * 100) : 0;
             const nR = t.esCustom ? `${t.nombre} (${t.rango})` : t.nombre;
             const vT = s.vip ? `  ${tierVipDe(s).nombre}` : "";
             const rT = actualizarRachaDiaria(player, s);
-            const ls = [`${nR}${b ? "  " + b : ""}${vT}`, s.partidos > 0 ? `Nivel ${s.nivel} · ELO ${s.mmr} · ${wr}% en ${s.partidos} partidos${s.racha >= 2 ? ` · 🔥${s.racha}` : ""}` : `Nivel ${s.nivel} · ELO ${s.mmr} · recién arrancás`, `💰 ${s.monedas}`];
+            const ls = [
+                `${nR}${b ? "  " + b : ""}${vT}`.trim(),
+                s.partidos > 0
+                    ? `Nivel ${s.nivel}   ·   ELO ${s.mmr}   ·   ${wr}% en ${s.partidos} partidos${s.racha >= 2 ? `   ·   🔥 racha ${s.racha}` : ""}`
+                    : `Nivel ${s.nivel}   ·   ELO ${s.mmr}   ·   primera vez en la sala`,
+                `Saldo: ${s.monedas} 💰`,
+            ];
             if (rT) ls.push(rT);
-            msgCaja(`⚽ ¡Bienvenido, ${player.name}!`, ls, t.color, "bold", 1, player.id);
+            msgCaja(`⚽ Bienvenido, ${player.name}`, ls, t.color, "bold", 1, player.id);
             if (!s.intro_vista) {
                 s.intro_vista = true; markDirty(getPlayerKey(player));
-                msgCaja(`👋 Bienvenido a ${CONFIG.NOMBRE_SALA}`, [`Es tu primera vez:`, `🤖 La sala la maneja 『𝗕𝗮𝗵𝗜𝗔』 — tablas, niveles, logros automáticos.`, `📖 !ayuda o !comandos`, `💬 ${CONFIG.DISCORD_INVITE}`], COLORES.info, "small", 0, player.id);
+                msgCaja(`👋 Primera vez en ${CONFIG.NOMBRE_SALA}`, [
+                    "Te damos la bienvenida. Tres cosas para arrancar:",
+                    "   ·  !ayuda     — comandos principales",
+                    "   ·  !jugar     — entrás a la cancha",
+                    "   ·  !discord   — entrá a la comunidad",
+                ], COLORES.info, "small-bold", 0, player.id);
             }
             if (s.msg_join) sendAnnouncement(`${player.name}: ${s.msg_join}`, player.id, s.color_nombre || 0x00FFFF, "small-bold", 1);
             const cj = STATE.room.getPlayerList().length - 1;
@@ -2956,7 +3136,7 @@ function setupEvents() {
             if (STATE.partidoEnCurso && player.team !== 0 && !vol) {
                 STATE.abandonos.set(key, { team: player.team, ts: Date.now(), stats: { ...(STATE.matchStats[player.id] || { goles: 0, asistencias: 0, atajadas: 0 }) } });
             }
-            if (!vol) { if (s?.msg_leave) sendAnnouncement(`${player.name}: ${s.msg_leave}`, null, s.color_nombre || 0x00FFFF, "small-bold", 1); else msgSmall(`👋 Se piró ${player.name}`, null, COLORES.info, "small", 0); }
+            if (!vol) { if (s?.msg_leave) sendAnnouncement(`${player.name}: ${s.msg_leave}`, null, s.color_nombre || 0x00FFFF, "small-bold", 1); else msgSmall(`👋 Se desconectó ${player.name}`, null, COLORES.info, "small", 0); }
             const cj = STATE.room.getPlayerList().length - 2;
             notificarJoinLeave(construirEmbed({ title: "🔴 Desconectado", description: `**${player.name}** salió`, color: 0xFF3366, footer: `${Math.max(cj, 0)}/30` }));
             if (STATE.liveStatsMessageId) editarMensajeLive(STATE.liveStatsMessageId, embedEstadoSala());
@@ -3013,8 +3193,8 @@ function setupEvents() {
     STATE.room.onGameTick = function() {
         try {
             const jt = STATE.room.getPlayerList();
-            const bp = safeOperation(() => STATE.room.getBallPosition());
-            const bpt = safeOperation(() => STATE.room.getDiscProperties(0));
+            const bp = safeGetBallPos();
+            const bpt = safeGetBallProps();
             handlePowerShot(jt, bp, bpt);
             manejarEstelaVip();
             if (!STATE.partidoEnCurso) return;
@@ -3027,7 +3207,7 @@ function setupEvents() {
             for (const p of jt) {
                 if (p.team === 0 || !p.position) continue;
                 const prev = STATE.playerPositions[p.id];
-                if (!prev || Math.abs(prev.x - p.position.x) > 0.5 || Math.abs(prev.y - p.position.y) > 0.5) {
+                if (!prev || Math.abs(prev.x - p.position.x) > CONFIG.AFK_MOVIMIENTO_MIN_PX || Math.abs(prev.y - p.position.y) > CONFIG.AFK_MOVIMIENTO_MIN_PX) {
                     STATE.playerLastMove[p.id] = ahoraTick;
                     STATE.playerPositions[p.id] = { x: p.position.x, y: p.position.y };
                 }
@@ -3050,14 +3230,14 @@ function setupEvents() {
             if (!STATE.partidoEnCurso) return;
             const ahora = Date.now();
             const vK = calcularVelocidadTiro();
-            const pX = safeOperation(() => STATE.room.getBallPosition())?.x ?? null;
+            const pX = safeGetBallPos()?.x ?? null;
             const kT = getPlayerKey(player);
             STATE.toquesRecientes.push({ id: player.id, name: player.name, team: player.team, tiempo: ahora, velocidadKmh: vK, posX: pX, key: kT });
             if (STATE.toquesRecientes.length > CONFIG.MAX_TOQUES_RECIENTES) STATE.toquesRecientes.shift();
             if (!STATE.matchStats[player.id]) STATE.matchStats[player.id] = { goles: 0, asistencias: 0, ultimoFuePowerShot: 0 };
             if (player.team === 1 || player.team === 2) {
                 if (STATE.tiroPeligroso && STATE.tiroPeligroso.team === player.team && (ahora - STATE.tiroPeligroso.ts) < CONFIG.ATAJADA_VENTANA_MS) {
-                    const bA = safeOperation(() => STATE.room.getBallPosition());
+                    const bA = safeGetBallPos();
                     const lim = bA ? getLimitesCancha() : null;
                     const mAX = lim ? (player.team === 1 ? -lim.maxX : lim.maxX) : null;
                     const cC = mAX !== null && Math.abs(bA.x - mAX) < CONFIG.ATAJADA_ZONA_DISTANCIA * 1.3;
@@ -3072,13 +3252,13 @@ function setupEvents() {
                             const m = STATE.ultimoMarcadorConocido;
                             if (m && m.timeLimit > 0 && m.time >= (m.timeLimit * 60 - 30)) { const d = player.team === 1 ? (m.red - m.blue) : (m.blue - m.red); if (d === 1) darBadge(player, "arquero_heroe"); }
                             markDirty(kT);
-                            msgMini(`🧤✋ ¡Tapadón de ${player.name}!`, null, player.team === 1 ? 0xFF3366 : 0x1E90FF, 0);
+                            msgMini(`🧤 ¡Tapadón de ${player.name}!`, null, player.team === 1 ? 0xFF3366 : 0x1E90FF, 0);
                         }
                     }
                     STATE.tiroPeligroso = null;
                 } else {
-                    const bP = safeOperation(() => STATE.room.getBallPosition());
-                    const bPr = safeOperation(() => STATE.room.getDiscProperties(0));
+                    const bP = safeGetBallPos();
+                    const bPr = safeGetBallProps();
                     const lim = bP && bPr ? getLimitesCancha() : null;
                     if (lim && vK !== null && vK >= CONFIG.ATAJADA_MIN_KMH) {
                         const eD = player.team === 1 ? 2 : 1;
@@ -3109,7 +3289,7 @@ function setupEvents() {
         try {
             const sc = STATE.room.getScores();
             const ahora = Date.now();
-            if (STATE.golDeOroActivo && sc && sc.time > (sc.timeLimit * 60 - 60)) { msgBox(`🥇 ¡GOL DE ORO!`, [`¡${team === 1 ? "ROJO" : "AZUL"} GANA!`], COLORES.oro, "small-bold", 2); setTimeout(() => STATE.room.stopGame(), 3000); }
+            if (STATE.golDeOroActivo && sc && sc.time > (sc.timeLimit * 60 - 60)) { msgBox(`🥇 Gol de oro`, [`¡${team === 1 ? "ROJO" : "AZUL"} GANA!`], COLORES.oro, "small-bold", 2); setTimeout(() => STATE.room.stopGame(), 3000); }
             const tE = STATE.toquesRecientes.filter(t => t.team === team && ahora - t.tiempo < CONFIG.ASISTENCIA_VENTANA_MS);
             const gT = tE[tE.length - 1];
             const vK = gT?.velocidadKmh ?? calcularVelocidadTiro();
@@ -3133,7 +3313,7 @@ function setupEvents() {
             if (gT && STATE.matchStats[gT.id]) {
                 STATE.matchStats[gT.id].goles++;
                 const esPS = STATE.matchStats[gT.id].ultimoFuePowerShot && ahora - STATE.matchStats[gT.id].ultimoFuePowerShot < 3000;
-                const tit = esPS ? "💥 ¡GOLAZO DE POWER SHOT!" : FRASES_GOL_TITULOS[Math.floor(Math.random() * FRASES_GOL_TITULOS.length)];
+                const tit = esPS ? "💥 ¡Golazo de power shot!" : FRASES_GOL_TITULOS[Math.floor(Math.random() * FRASES_GOL_TITULOS.length)];
                 if (gol) {
                     if (gT.posX !== null && gT.posX !== undefined) { const lg = getLimitesCancha(); const gX = team === 1 ? lg.maxX : -lg.maxX; if (Math.abs(gT.posX - gX) > 250) darBadge(gol, "gol_distancia"); }
                     if (vK !== null && vK >= 100) darBadge(gol, "gol_misilazo");
@@ -3170,10 +3350,10 @@ function setupEvents() {
                     STATE.eventoGolX2Activo = false;
                     const kG = gol ? getPlayerKey(gol) : null;
                     const sG = kG ? STATE.baseDatos[kG] : null;
-                    if (sG) { sG.monedas += 50; markDirty(kG); msgGame(`🎲 ¡Gol x2! ${gT.name} +50💰`, null, COLORES.oro, 1); }
+                    if (sG) { sG.monedas += 50; markDirty(kG); msgGame(`🎲 ¡Gol x2! ${gT.name} +50 💰`, null, COLORES.oro, 1); }
                 }
             } else if (sc && !autoAn) {
-                anunciarGol(`${EMOJIS.soccer} ${EMOJIS.sparkles} GOOOL!`, team, `Equipo ${team === 1 ? "ROJO" : "AZUL"}`, null, vK, sc);
+                anunciarGol(`⚽ ¡Gol!`, team, `Equipo ${team === 1 ? "ROJO" : "AZUL"}`, null, vK, sc);
                 activarRainbowEquipo(team);
             }
             STATE.toquesRecientes = []; STATE.tiroPeligroso = null; resetPowershotState();
@@ -3197,13 +3377,13 @@ function setupEvents() {
             STATE.rainbowEquipoActivo = null;
             safeOperation(() => STATE.room.startRecording());
             STATE.festejosVipActivos = {};
-            const pb = safeOperation(() => STATE.room.getDiscProperties(0));
+            const pb = safeGetBallProps();
             if (pb && typeof pb.color === "number" && pb.color >= 0) {
                 STATE.colorPelotaDefault = pb.color;
             } else {
                 STATE.colorPelotaDefault = 0xFFFFFF;
                 setTimeout(() => {
-                    const p2 = safeOperation(() => STATE.room.getDiscProperties(0));
+                    const p2 = safeGetBallProps();
                     if (p2 && typeof p2.color === "number" && p2.color >= 0) STATE.colorPelotaDefault = p2.color;
                 }, 300);
             }
@@ -3227,7 +3407,7 @@ function setupEvents() {
             });
             markDirty();
             asignarCapitanes();
-            sendAnnouncement(`${FRASES_ARRANQUE_PARTIDO[Math.floor(Math.random() * FRASES_ARRANQUE_PARTIDO.length)]} Temporada S${STATE.TEMPORADA_ACTUAL}`, null, 0xFFFFFF, "bold", 1);
+            sendAnnouncement(`⚽ ${FRASES_ARRANQUE_PARTIDO[Math.floor(Math.random() * FRASES_ARRANQUE_PARTIDO.length)]} · Temporada S${STATE.TEMPORADA_ACTUAL}`, null, 0xFFFFFF, "bold", 1);
             detectarYAnunciarRivalidad();
             STATE.ultimoMarcadorConocido = { red: 0, blue: 0, time: 0, scoreLimit: STATE.room.getScores()?.scoreLimit, timeLimit: STATE.room.getScores()?.timeLimit };
             if (STATE.liveStatsMessageId) editarMensajeLive(STATE.liveStatsMessageId, embedEstadoSala());
@@ -3260,7 +3440,6 @@ function setupEvents() {
             if (!sc) {
                 const psLimpias = STATE.room.getPlayerList();
                 psLimpias.forEach(p => { const k = getPlayerKey(p); if (STATE.baseDatos[k]) STATE.baseDatos[k].jugando = false; });
-                // Reembolsar apuestas — nadie va a cobrar nada sin marcador.
                 Object.values(STATE.apuestas).forEach(a => { const s = STATE.baseDatos[a.key]; if (s) s.monedas += a.cantidad; markDirty(a.key); });
                 STATE.apuestas = {};
                 msgSmall(`⚠️ Partido detenido sin marcador — ELO no afectado`, null, COLORES.advertencia, "small-bold", 1);
@@ -3293,7 +3472,7 @@ function setupEvents() {
             // las monedas ganadas por apuesta) y limpiar STATE.apuestas después
             // del pago — sin esto, la apuesta vieja quedaba para siempre y se
             // re-pagaba en cada partido siguiente (fuga grave de moneda).
-            Object.entries(STATE.apuestas).forEach(([pid, a]) => { const s = STATE.baseDatos[a.key]; if (!s) return; if (a.equipo === gan) { const pr = Math.round(a.cantidad * CONFIG.CUOTA_APUESTA); s.monedas += pr; msgSmall(`🎰 Apuesta ganada +${pr}💰`, parseInt(pid, 10), COLORES.exito, "small-bold", 1); markDirty(a.key); } });
+            Object.entries(STATE.apuestas).forEach(([pid, a]) => { const s = STATE.baseDatos[a.key]; if (!s) return; if (a.equipo === gan) { const pr = Math.round(a.cantidad * CONFIG.CUOTA_APUESTA); s.monedas += pr; msgSmall(`🎰 Apuesta ganada +${pr} 💰`, parseInt(pid, 10), COLORES.exito, "small-bold", 1); markDirty(a.key); } });
             STATE.apuestas = {};
             const r = ps.filter(p => p.team === 1), a = ps.filter(p => p.team === 2);
             const mr = r.length ? r.reduce((s, p) => s + (STATE.baseDatos[getPlayerKey(p)]?.mmr || 1000), 0) / r.length : 1000;
@@ -3314,7 +3493,7 @@ function setupEvents() {
                     s.monedas += mG;
                     const xG = pS.goles * 15;
                     darXP(p, xG);
-                    if (Math.random() < CONFIG.CAJA_PROBABILIDAD) { const mc = Math.floor(CONFIG.CAJA_MONEDAS_MIN + Math.random() * (CONFIG.CAJA_MONEDAS_MAX - CONFIG.CAJA_MONEDAS_MIN)); s.monedas += mc; msgSmall(`🎁✨ Caja +${mc}💰`, p.id, COLORES.oro, "small-bold", 1); }
+                    if (Math.random() < CONFIG.CAJA_PROBABILIDAD) { const mc = Math.floor(CONFIG.CAJA_MONEDAS_MIN + Math.random() * (CONFIG.CAJA_MONEDAS_MAX - CONFIG.CAJA_MONEDAS_MIN)); s.monedas += mc; msgSmall(`🎁 Caja +${mc} 💰`, p.id, COLORES.oro, "small-bold", 1); }
                     const eR = p.team === 1 ? ma : mr;
                     let res = 0.5, resT = "🤝 Empate";
                     const rA = s.racha;
@@ -3341,15 +3520,21 @@ function setupEvents() {
                         const aj = pm + bR + bM;
                         const cam = calcularCambioElo(s.mmr, eR, res, s.partidos, aj, false);
                         const camR = aplicarCambioEloPartido(s, { eloRival: eR, resultado: res, cambio: cam, motivo: res === 1 ? "victoria" : res === 0 ? "derrota" : "empate" });
-                        lE = `📊 ELO: ${camR >= 0 ? "+" : ""}${camR} → ${s.mmr}`;
+                        lE = `ELO: ${camR >= 0 ? "+" : ""}${camR}  →  ${s.mmr}`;
                         const tp = getTituloSeguro(s.titulo || "bronce1");
                         const sg = getSiguienteRango(s.titulo || "bronce1");
-                        if (sg) { const rw = Math.max(1, sg.req - tp.req); const av = Math.max(0, Math.min(1, (s.mmr - tp.req) / rw)); const B = 10, ll = Math.round(av * B); lE += `\n   ${"▰".repeat(ll) + "▱".repeat(B - ll)} faltan ${Math.max(0, sg.req - s.mmr)} para ${sg.nombre}`; }
+                        if (sg) { const rw = Math.max(1, sg.req - tp.req); const av = Math.max(0, Math.min(1, (s.mmr - tp.req) / rw)); const B = 10, ll = Math.round(av * B); lE += `\n   ${"▰".repeat(ll) + "▱".repeat(B - ll)}  faltan ${Math.max(0, sg.req - s.mmr)} para ${sg.nombre}`; }
                     } else { s.escudo_mmr_activo = false; lE = `🛡️ Escudo Anti-ELO usado`; msgSmall(`🛡️ ${p.name} usó Escudo`, null, COLORES.info, "small", 0); }
                     if (gan !== 0) chequearAntiSmurf(p, s);
                     const col = resT === "🏆 Victoria" ? 0x00FF88 : resT === "❌ Derrota" ? 0xFF3366 : 0xFFD700;
                     const tj = STATE.inicioPartido ? formatTime((Date.now() - STATE.inicioPartido) / 1000) : "?";
-                    sendAnnouncement(`${resT} · ⚽${pS.goles} 🎁${pS.asistencias || 0} · 💰+${mG} ⭐+${xG} · ${lE}\n   Tiempo: ${tj}`, p.id, col, "small-bold", 0);
+                    sendAnnouncement(
+                        `${resT}\n` +
+                        `   ⚽ ${pS.goles} goles   ·   🎁 ${pS.asistencias || 0} asistencias   ·   💰 +${mG}   ·   ⭐ +${xG} XP\n` +
+                        `   ${lE}\n` +
+                        `   Partido: ${tj}`,
+                        p.id, col, "small-bold", 0
+                    );
                     actualizarTitulo(p);
                     verificarBadgesPostPartido(p, s, pS.goles);
                     verificarMisionDiaria(p, s, pS.goles);
@@ -3379,22 +3564,22 @@ function setupEvents() {
             if (vB) { const kk = getPlayerKey(STATE.ArqueroBLUE), s = STATE.baseDatos[kk]; if (s) { s.vallas_invictas = (s.vallas_invictas || 0) + 1; if (s.vallas_invictas >= 10 && !s.badges.includes("portero_muro")) darBadge(STATE.ArqueroBLUE, "portero_muro"); } }
             if (fig) { const fS = STATE.matchStats[fig.id] || { goles: 0, asistencias: 0 }; const rat = Math.min(10, (6 + fS.goles * 1.2 + fS.asistencias * 0.8)).toFixed(1); sendAnnouncement(`🌟 Figura: ${fig.name} · ⚽${fS.goles} 🎁${fS.asistencias} · ❬${rat}/10❭`, null, COLORES.oro, "small-bold", 2); }
             const tp = STATE.equipoRojoPosesion + STATE.equipoAzulPosesion;
-            if (tp > 0) { const pR = ((STATE.equipoRojoPosesion / tp) * 100).toFixed(1); sendAnnouncement(`📈 Posesión: 🔴 ${pR}% : ${(100 - pR).toFixed(1)}% 🔵`, null, 0xFFFFFF, "small", 0); }
+            if (tp > 0) { const pR = ((STATE.equipoRojoPosesion / tp) * 100).toFixed(1); sendAnnouncement(`📈 Posesión: 🔴 ${pR}%  ·  ${(100 - pR).toFixed(1)}% 🔵`, null, 0xFFFFFF, "small", 0); }
             iniciarVotacionMVP(fig);
             if (msgR.act.length) msgGame(`🔥 Racha: ${msgR.act.join(", ")}`, null, 0xFF6600, 1);
             if (msgR.rot.length) msgGame(`💀 Racha cortada: ${msgR.rot.join(", ")}`, null, 0x8888FF, 0);
             calcularPosesion();
             const rT = gan === 0 ? `⏱️ Empate ${sc.red}-${sc.blue}` : `⏱️ Victoria ${gan === 1 ? "ROJA 🔴" : "AZUL 🔵"} ${sc.red}-${sc.blue}`;
             sendAnnouncement(rT, null, 0xFFFFFF, "small-bold", 2);
-            sendAnnouncement(`📊 ELO promedio: 🔴 ${Math.round(mr)} - 🔵 ${Math.round(ma)}`, null, 0xFFFFFF, "small", 0);
+            sendAnnouncement(`📊 ELO promedio: 🔴 ${Math.round(mr)}  ·  🔵 ${Math.round(ma)}`, null, 0xFFFFFF, "small", 0);
             const cR = gan === 1 ? 0xFF3366 : gan === 2 ? 0x00BFFF : 0xFFD700;
             const cam = [
-                { name: "Resultado", value: `🔴 ROJO ${sc.red} — ${sc.blue} AZUL 🔵`, inline: false },
+                { name: "Resultado", value: `🔴 Rojo ${sc.red}  —  ${sc.blue} Azul 🔵`, inline: false },
                 { name: "⏱️ Duración", value: formatTime((Date.now() - STATE.inicioPartido) / 1000), inline: true },
                 { name: "⚖️ Posesión", value: `🔴 ${STATE.equipoRojoPosesion || 0} vs 🔵 ${STATE.equipoAzulPosesion || 0}`, inline: true },
             ];
             if (fig) { const fS = STATE.matchStats[fig.id] || { goles: 0, asistencias: 0 }; cam.push({ name: "🌟 Figura", value: `${fig.name} — ⚽${fS.goles} 🎁${fS.asistencias}`, inline: false }); }
-            notificarEstadisticas(construirEmbed({ title: "📊 Partido finalizado", description: rT, color: cR, fields: cam, footer: "🏆 Bahía Blanca Futsal" }));
+            notificarEstadisticas(construirEmbed({ title: "📊 Partido finalizado", description: rT, color: cR, fields: cam, footer: `🏆 Bahía Blanca Futsal · ${ROOM_ID}` }));
             actualizarHistorial();
             saveDatabase().catch(e => logMsg('errors.log', `[${ROOM_ID}] Error guardando ELO: ${e.message}`));
             handleFairPlay(sc); handleGanaSigue(gan);
@@ -3408,9 +3593,9 @@ function setupEvents() {
             const stats = getStats(player);
             const isAdmin = STATE.room.getPlayer(player.id).admin;
             const key = getPlayerKey(player);
-            if (STATE.mutesTemporales.find(m => m.auth === key)) { msgError("Estás muteado", player.id); return false; }
-            if (!isAdmin && checkFlood(player)) { msgError(`Pará un poco. Muteado ${Math.round(CONFIG.FLOOD_MUTE_MS / 1000)}s`, player.id); return false; }
-            if (message.startsWith("t ") && player.team !== 0) { const tm = message.slice(2); STATE.room.getPlayerList().filter(p => p.team === player.team).forEach(p => sendAnnouncement(`🔒 [TEAM] ${player.name}: ${tm}`, p.id, player.team === 1 ? COLORES.equipo_rojo : COLORES.equipo_azul, "small-bold", 1)); return false; }
+            if (STATE.mutesTemporales.find(m => m.auth === key)) { msgError("Estás muteado.", player.id); return false; }
+            if (!isAdmin && checkFlood(player)) { msgError(`Pará un poco. Muteado ${Math.round(CONFIG.FLOOD_MUTE_MS / 1000)}s.`, player.id); return false; }
+            if (message.startsWith("t ") && player.team !== 0) { const tm = message.slice(2); STATE.room.getPlayerList().filter(p => p.team === player.team).forEach(p => sendAnnouncement(`🔒 [Equipo] ${player.name}: ${tm}`, p.id, player.team === 1 ? COLORES.equipo_rojo : COLORES.equipo_azul, "small-bold", 1)); return false; }
             if (message.startsWith("c ")) { const sc = stats; if (sc?.clan && STATE.clanes[sc.clan]) { const cm = message.slice(2), nc = STATE.clanes[sc.clan].nombre; STATE.room.getPlayerList().filter(p => STATE.baseDatos[getPlayerKey(p)]?.clan === sc.clan).forEach(p => sendAnnouncement(`⚔️ [${nc}] ${player.name}: ${cm}`, p.id, 0xFF00FF, "small-bold", 1)); return false; } }
             if (message.startsWith("@@")) { const m = message.match(/^@@(\S+)\s+(.+)$/); if (m) { const t = findOnlinePlayer(m[1]); if (t) { sendAnnouncement(`📨 [PM de ${player.name}]: ${m[2]}`, t.id, COLORES.advertencia, "small-bold", 2); sendAnnouncement(`📨 → ${t.name}: ${m[2]}`, player.id, COLORES.exito, "small", 0); } return false; } }
             const msg = message.toLowerCase().trim();
@@ -3423,13 +3608,13 @@ function setupEvents() {
                 const nT = `Nv.${stats?.nivel ?? 1} · #${player.id}`;
                 const sB = b ? ` ${b}` : "";
                 if (esOwner(player)) { color = 0xFFD700; pre = `〔👑 · ${nT}〕${sB}`; }
-                else if (rango === "coowner") { color = 0xDA70D6; pre = `〔✨ · ${nT}〕${sB}`; }
-                else if (rango === "admin" || isAdmin) { color = 0xFFA500; pre = `〔🛠️ · ${nT}〕${sB}`; }
-                else if (rango === "modplus") { color = 0x00BFFF; pre = `〔🛡️ · ${nT}〕${sB}`; }
-                else if (rango === "mod") { color = 0x1E90FF; pre = `〔🛡️ · ${nT}〕${sB}`; }
+                else if (rango === RANGOS.COOWNER) { color = 0xDA70D6; pre = `〔✨ · ${nT}〕${sB}`; }
+                else if (rango === RANGOS.ADMIN || isAdmin) { color = 0xFFA500; pre = `〔🛠️ · ${nT}〕${sB}`; }
+                else if (rango === RANGOS.MODPLUS) { color = 0x00BFFF; pre = `〔🛡️ · ${nT}〕${sB}`; }
+                else if (rango === RANGOS.MOD) { color = 0x1E90FF; pre = `〔🛡️ · ${nT}〕${sB}`; }
                 else if (stats?.vip) { const tc = tierVipDe(stats); color = tc.chatColor; pre = `〔${tc.emoji} ${nRSE} · ${nT}〕${sB}`; }
                 else { color = 0xFFFFFF; estilo = "small"; pre = `〔${formatTituloDisplay(t)} · ${nT}〕${sB}`; }
-                const eSF = esOwner(player) || ["coowner", "admin", "modplus", "mod"].includes(rango) || isAdmin;
+                const eSF = esOwner(player) || [RANGOS.COOWNER, RANGOS.ADMIN, RANGOS.MODPLUS, RANGOS.MOD].includes(rango) || isAdmin;
                 if (!eSF && stats?.color_nombre) color = stats.color_nombre;
                 sendAnnouncement(`${pre} ${player.name}: ${message}`, null, color, estilo, 1);
                 return false;
@@ -3441,7 +3626,7 @@ function setupEvents() {
                 commands[cmd](player, args, isAdmin);
                 return false;
             }
-            msgError("Ese comando no existe, probá !comandos", player.id);
+            msgError("Comando desconocido. Usá !comandos para ver la lista.", player.id);
             return false;
         } catch (e) { logMsg('errors.log', `[${ROOM_ID}] Error onPlayerChat: ${e.message}`); return false; }
     };
@@ -3572,11 +3757,10 @@ setInterval(guardarVerif, 30000);
 
     STATE.progEcoInterval = setInterval(() => {
         if (STATE.room && !STATE.partidoEnCurso) {
-            sendAnnouncement(`\ud83d\udce2 ${ANUNCIOS[STATE.anuncioIndex % ANUNCIOS.length]}`, null, COLORES.info, "small", 1);
+            sendAnnouncement(`📢 ${ANUNCIOS[STATE.anuncioIndex % ANUNCIOS.length]}`, null, COLORES.info, "small", 1);
             STATE.anuncioIndex++;
         }
     }, 180000 + Math.floor(Math.random() * 120000));
-    progEco();
     setInterval(() => { if (STATE.room) { sendAnnouncement(`📢 ${ANUNCIOS_DISCORD[STATE.anuncioDiscordIndex % ANUNCIOS_DISCORD.length]}`, null, 0x5865F2, "small", 1); STATE.anuncioDiscordIndex++; } }, 45000);
     STATE.afkCheckInterval = setInterval(() => { if (STATE.partidoEnCurso) checkAFK(); }, 3000);
 
@@ -3591,12 +3775,7 @@ setInterval(guardarVerif, 30000);
         // FIX #6: chequear expiración VIP sin depender de que haya partido en
         // curso. Antes quedaba atrapado dentro de `if (STATE.partidoEnCurso)`
         // así que un VIP sin partido no expiraba nunca hasta el próximo kick.
-        if (STATE.room) {
-            STATE.room.getPlayerList().forEach(pl => {
-                const s = STATE.baseDatos[getPlayerKey(pl)];
-                if (s && !s.vip_perma && s.vip_expira && ahora > s.vip_expira) { s.vip = false; s.vip_expira = null; s.vip_tier = "vip"; markDirty(getPlayerKey(pl)); msgSmall("⌛ Tu VIP expiró", pl.id, COLORES.advertencia, "small", 0); }
-            });
-        }
+        revisarVipExpirados();
         if (STATE.adminsAutomaticos.size) STATE.room.getPlayerList().forEach(pl => { const a = STATE.authPorId.get(pl.id); if (a && STATE.adminsAutomaticos.has(a) && !pl.admin) safeOperation(() => STATE.room.setPlayerAdmin(pl.id, true)); });
         if (STATE.partidoEnCurso) STATE.room.getPlayerList().forEach(pl => { if (pl.team !== 0 && !STATE.afkPlayers.has(pl.id)) { const k = getPlayerKey(pl); const s = STATE.baseDatos[k]; if (s) { s.segundos_jugados = (s.segundos_jugados || 0) + 60; markDirty(k); } } });
     }, 60000);
