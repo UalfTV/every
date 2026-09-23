@@ -1,6 +1,18 @@
 // BahiaClient — servidor de presencia, amigos, clanes, voz, beta keys, admin, stats, party
 // Node puro + pg para stats.
 //
+// v5 — Pasada de calidad:
+//   · /admin requiere BETA_ADMIN_KEY (antes servía el HTML a cualquiera)
+//   · bind a 127.0.0.1 por defecto (BIND_HOST override)
+//   · Comparación de secretos con timingSafeEqual
+//   · /admin/user/block y /delete limpian party huérfana
+//   · getPresenceForPlayer O(1) via índice inverso
+//   · flushAndExit async: espera cierre del pool de Postgres (con techo)
+//   · readBody rechaza con 413 explícito (BodyTooLargeError)
+//   · new URL con fallback a "localhost" si falta Host header
+//   · fetch() con fallback a http.get para Node 16/17
+//   · RATE_SSE_CONNECTIONS → MAX_SSE_CONNECTIONS_PER_PLAYER (es cap, no rate)
+//
 // v4 — Fixes post-publish:
 //   · Privacy: friends_of_friends ahora se aplica (antes se ignoraba)
 //   · Anti-impersonación en /heartbeat (playerId debe pertenecer al clientId)
@@ -15,10 +27,6 @@
 //   · Validación estricta de /voice/signal
 //   · Nuevo endpoint /player/update-nick
 //   · discordId persistido en players
-//
-// v3 — Party: grupo temporal con líder, SSE push, TTL 24h.
-// v2 — Social Center: playerId como identidad, friendships, SSE /events,
-//      privacy por playerId, notificaciones persistentes + ephemeral.
 //
 // LIMITACIÓN BETA: auth con API key compartida.
 
@@ -41,6 +49,10 @@ console.warn = (...a) => _origWarn(`[${_ts()}]`, ...a)
 console.error = (...a) => _origError(`[${_ts()}]`, ...a)
 
 const PORT = parseInt(process.env.PORT || '8787', 10)
+// Por defecto bindeamos solo a localhost. Si necesitás exponer el server a
+// otra interfaz (ej. otro contenedor en la misma red Docker), seteá
+// BIND_HOST=0.0.0.0 o la IP correspondiente en el .env.
+const BIND_HOST = process.env.BIND_HOST || '127.0.0.1'
 const API_KEY = process.env.API_KEY || ''
 const BETA_ADMIN_KEY = process.env.BETA_ADMIN_KEY || ''
 const DATA_DIR = process.env.DATA_DIR || '/opt/bc-presence/data'
@@ -94,7 +106,10 @@ const RATE_PLAYER_SEARCHES = 30
 const RATE_PLAYER_SEARCHES_WINDOW_MS = 60_000
 const RATE_PRIVACY_UPDATES = 5
 const RATE_PRIVACY_UPDATES_WINDOW_MS = 60_000
-const RATE_SSE_CONNECTIONS = 5
+// No es un rate limit sino un cap duro de conexiones concurrentes por player
+// (múltiples tabs, reconexiones zombie). Al llegar al cap, se cierra la más
+// vieja para hacerle lugar a la nueva.
+const MAX_SSE_CONNECTIONS_PER_PLAYER = 5
 
 const RATE_PARTY_CREATES = 3
 const RATE_PARTY_CREATES_WINDOW_MS = 5 * 60 * 1000
@@ -138,6 +153,9 @@ const NICKNAME_RE = /^[\p{L}\p{N}\s._\-+()\[\]#@!?]{1,25}$/u
 const GEO_CACHE_TTL = 24 * 60 * 60 * 1000
 const GEO_RATE_MS = 1500
 const GEO_FETCH_TIMEOUT_MS = 5000
+// fetch() global es de Node 18+. Para Node 16/17 tiramos de http.get con
+// AbortSignal. Detectamos una vez al arranque.
+const HAS_GLOBAL_FETCH = typeof fetch === 'function'
 
 const NOTIF_TYPES_PERSISTENT = new Set([
   'friend_request', 'friend_accepted', 'clan_invite',
@@ -161,6 +179,10 @@ if (!BETA_ADMIN_KEY) console.warn('[bc-presence] OJO: sin BETA_ADMIN_KEY.')
 if (TRUST_PROXY) console.log('[bc-presence] TRUST_PROXY=1.')
 
 const presence = new Map()
+// Índice inverso playerIdLower → nickLower del presence activo. Se mantiene
+// sincronizado desde /heartbeat, /leave y cleanup(). Evita iterar toda la
+// presencia cada vez que alguien pregunta por un jugador.
+const presenceByPlayerId = new Map()
 const friendships = new Map()
 const notificationsPersistent = new Map()
 const notificationsEphemeral = new Map()
@@ -217,6 +239,38 @@ function objFromMap(map, mapper){
   const out = {}
   for(const [k, v] of map) out[k] = mapper(v)
   return out
+}
+
+// ============================================================
+// PRESENCE INDEX
+// ============================================================
+
+function _indexPresence(nickLower, entry){
+  const pid = entry && entry.playerId ? playerIdL(entry.playerId) : null
+  if(pid) presenceByPlayerId.set(pid, nickLower)
+}
+function _unindexPresence(nickLower){
+  for(const [pid, nk] of presenceByPlayerId){ if(nk === nickLower){ presenceByPlayerId.delete(pid); return } }
+}
+
+// ============================================================
+// AUTH HELPERS
+// ============================================================
+
+// Comparación timing-safe: dos secretos del mismo largo se comparan en tiempo
+// constante. Si los largos difieren, return false rápido (esa info ya es
+// pública vía Content-Length).
+function secretoValido(recibido, esperado){
+  if(typeof recibido !== 'string' || typeof esperado !== 'string') return false
+  if(!recibido.length || !esperado.length) return false
+  const a = Buffer.from(recibido)
+  const b = Buffer.from(esperado)
+  if(a.length !== b.length) return false
+  try { return crypto.timingSafeEqual(a, b) } catch { return false }
+}
+
+class BodyTooLargeError extends Error {
+  constructor(maxBytes){ super(`body too large (max ${maxBytes} bytes)`); this.code = 'BODY_TOO_LARGE'; this.status = 413 }
 }
 
 // ============================================================
@@ -376,7 +430,8 @@ function loadFriendsFromDisk(){
     console.log(`[bc-presence] migración: ${migrated.size} jugadores, ${resolved} aristas resueltas, ${dropped} dropeadas`)
     if(droppedList.length){ console.warn(`[bc-presence] entradas dropeadas (primeras 20):`, droppedList.slice(0, 20)) }
     friendsDirtyRef.v = true
-    scheduleSaveFriendships()
+    // Defer para garantizar que las declaraciones de abajo ya existan.
+    setImmediate(() => scheduleSaveFriendships())
     return
   }
 
@@ -547,17 +602,24 @@ function enforceAvatarLimits(){
   }
 }
 
-function flushAndExit(signal){
+async function flushAndExit(signal){
   console.log(`[bc-presence] ${signal}, guardando...`)
-  // Cerrar pool de Postgres (asíncrono, no bloqueante).
+
+  // 1) Esperar a que el pool de Postgres cierre (con timeout de seguridad).
   try {
-    if(db && typeof db.shutdown === 'function'){
-      db.shutdown().catch(e => console.warn('[bc-presence] db.shutdown error:', e.message))
-    } else if(db && db.pool && typeof db.pool.end === 'function'){
-      db.pool.end().catch(() => {})
-    }
+    const shutdownPromise = (db && typeof db.shutdown === 'function')
+      ? db.shutdown()
+      : (db && db.pool && typeof db.pool.end === 'function' ? db.pool.end() : Promise.resolve())
+    await Promise.race([
+      Promise.resolve(shutdownPromise).catch(e => console.warn('[bc-presence] db.shutdown error:', e.message)),
+      new Promise(r => setTimeout(r, 3000)),
+    ])
   } catch(_) {}
+
+  // 2) Cancelar timers debounced (evita que un save async pise el save sync).
   for(const t of [avatarsTimer, profilesTimer, betaKeysTimer, usersTimer, playersTimer, clansTimer, friendsTimer, notificationsTimer, partiesTimer]){ if(t.t){ clearTimeout(t.t); t.t = null } }
+
+  // 3) Saves sincrónicos finales.
   try { saveJsonFile(AVATARS_PATH, objFromMap(userAvatars, e => ({ dataUrl: e.dataUrl, updatedAt: e.updatedAt }))) } catch(_){}
   try { saveJsonFile(PROFILES_PATH, objFromMap(userProfiles, e => ({ avatarColor: e.avatarColor, banner: e.banner, bio: e.bio, updatedAt: e.updatedAt }))) } catch(_){}
   try { saveJsonFile(BETA_KEYS_PATH, objFromMap(betaKeys, e => ({ createdAt: e.createdAt, usedAt: e.usedAt, usedBy: e.usedBy, nickname: e.nickname, notes: e.notes }))) } catch(_){}
@@ -567,11 +629,11 @@ function flushAndExit(signal){
   try { saveJsonFile(FRIENDS_PATH, objFromMap(friendships, e => ({ accepted: [...e.accepted], favorites: [...e.favorites], incoming: [...e.incoming], outgoing: [...e.outgoing] }))) } catch(_){}
   try { saveJsonFile(NOTIFICATIONS_PATH, objFromMap(notificationsPersistent, arr => arr)) } catch(_){}
   try { saveJsonFile(PARTIES_PATH, objFromMap(parties, p => ({ partyId: p.partyId, leaderId: p.leaderId, members: [...p.members], maxSize: p.maxSize, createdAt: p.createdAt, roomId: p.roomId, roomName: p.roomName }))) } catch(_){}
-  // Dar 200ms para que el pool cierre antes del exit.
-  setTimeout(() => process.exit(0), 200)
+
+  process.exit(0)
 }
-process.on('SIGTERM', () => flushAndExit('SIGTERM'))
-process.on('SIGINT', () => flushAndExit('SIGINT'))
+process.on('SIGTERM', () => { flushAndExit('SIGTERM').catch(() => process.exit(1)) })
+process.on('SIGINT',  () => { flushAndExit('SIGINT').catch(() => process.exit(1)) })
 
 process.on('uncaughtException', (err) => { console.error('[bc-presence] uncaughtException:', err && err.stack || err) })
 process.on('unhandledRejection', (reason) => { console.error('[bc-presence] unhandledRejection:', (reason && reason.stack) || reason) })
@@ -620,6 +682,26 @@ function queueGeoLookup(ip, callback){
   }})
   processGeoQueue()
 }
+
+// Wrapper JSON con fallback: fetch() global si está, si no http.get con
+// AbortSignal. Necesario para Node 16/17 (fetch recién desde 18).
+function _getJson(url, signal){
+  if(HAS_GLOBAL_FETCH){ return fetch(url, { method: 'GET', signal }).then(async r => r.ok ? r.json() : null).catch(() => null) }
+  return new Promise((resolve) => {
+    let req
+    try {
+      req = http.get(url, { signal, timeout: GEO_FETCH_TIMEOUT_MS }, (res) => {
+        if(res.statusCode !== 200){ res.resume(); return resolve(null) }
+        let d = ''
+        res.on('data', c => { d += c; if(d.length > 64_000) req.destroy() })
+        res.on('end', () => { try { resolve(JSON.parse(d)) } catch { resolve(null) } })
+      })
+    } catch(e){ return resolve(null) }
+    req.on('timeout', () => req.destroy(new Error('timeout')))
+    req.on('error', () => resolve(null))
+  })
+}
+
 async function processGeoQueue(){
   if(geoProcessing) return
   if(!geoQueue.length) return
@@ -632,15 +714,14 @@ async function processGeoQueue(){
     const ctrl = new AbortController()
     const to = setTimeout(() => ctrl.abort(), GEO_FETCH_TIMEOUT_MS)
     try {
-      const res = await fetch(`http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,country,countryCode,regionName,city,lat,lon,isp,query`, { method: 'GET', signal: ctrl.signal })
+      const data = await _getJson(`http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,country,countryCode,regionName,city,lat,lon,isp,query`, ctrl.signal)
       clearTimeout(to)
-      if(res.ok){
-        const data = await res.json()
-        if(data.status === 'success'){
-          const geo = { status: 'ok', country: data.country || '', countryCode: data.countryCode || '', regionName: data.regionName || '', city: data.city || '', lat: data.lat, lon: data.lon, isp: data.isp || '', ts: now() }
-          geoCache.set(ip, geo); onResolve(geo)
-        } else { onResolve(null) }
-      } else { onResolve(null) }
+      if(data && data.status === 'success'){
+        const geo = { status: 'ok', country: data.country || '', countryCode: data.countryCode || '', regionName: data.regionName || '', city: data.city || '', lat: data.lat, lon: data.lon, isp: data.isp || '', ts: now() }
+        geoCache.set(ip, geo); onResolve(geo)
+      } else {
+        onResolve(null)
+      }
     } catch(e){ clearTimeout(to); console.warn('[bc-presence] geo lookup falló:', e.message); onResolve(null) }
   }
   geoProcessing = false
@@ -658,11 +739,24 @@ function getPartyForPlayer(idLower){
 }
 
 function getPresenceForPlayer(idLower){
-  for(const [, v] of presence){
-    if(v.playerId && playerIdL(v.playerId) === idLower && (now() - v.updatedAt) < TTL_MS) return v
+  const nk = presenceByPlayerId.get(idLower)
+  if(nk){
+    const v = presence.get(nk)
+    if(v && (now() - v.updatedAt) < TTL_MS) return v
+    presenceByPlayerId.delete(idLower)
+  }
+  // Fallback: cubre entries que todavía no tienen índice (arranque, migración).
+  for(const [nkFallback, v] of presence){
+    if(v.playerId && playerIdL(v.playerId) === idLower && (now() - v.updatedAt) < TTL_MS){
+      presenceByPlayerId.set(idLower, nkFallback)
+      return v
+    }
     if(!v.playerId && v.clientId){
       const u = users.get(v.clientId)
-      if(u && u.playerId && playerIdL(u.playerId) === idLower && (now() - v.updatedAt) < TTL_MS) return v
+      if(u && u.playerId && playerIdL(u.playerId) === idLower && (now() - v.updatedAt) < TTL_MS){
+        presenceByPlayerId.set(idLower, nkFallback)
+        return v
+      }
     }
   }
   return null
@@ -756,7 +850,7 @@ function removeMemberFromParty(party, idLower, reason = 'left'){
 
 function cleanup(){
   const cutoff = now() - TTL_MS
-  for(const [key, v] of presence) if(v.updatedAt < cutoff) presence.delete(key)
+  for(const [key, v] of presence){ if(v.updatedAt < cutoff){ presence.delete(key); _unindexPresence(key) } }
   const vcut = now() - VOICE_TTL_MS
   for(const [roomId, ch] of voiceChannels){
     for(const [nk, p] of ch) if(p.lastSeen < vcut) ch.delete(nk)
@@ -828,15 +922,19 @@ function readBody(req, maxBytes = 16384){
     let data = '', bytes = 0
     req.on('data', chunk => {
       bytes += chunk.length
-      if(bytes > maxBytes){ reject(new Error('body too large')); req.destroy(); return }
+      if(bytes > maxBytes){ reject(new BodyTooLargeError(maxBytes)); req.destroy(); return }
       data += chunk
     })
     req.on('end', () => resolve(data))
     req.on('error', reject)
   })
 }
-function checkAuth(req){ if(!API_KEY) return true; return req.headers['x-bc-key'] === API_KEY }
-function checkAdminAuth(req){ if(!BETA_ADMIN_KEY) return false; return req.headers['x-admin-key'] === BETA_ADMIN_KEY }
+function parseJsonBody(raw){
+  try { return JSON.parse(raw || '{}') }
+  catch(e){ const err = new Error('invalid_json'); err.status = 400; throw err }
+}
+function checkAuth(req){ if(!API_KEY) return true; return secretoValido(req.headers['x-bc-key'], API_KEY) }
+function checkAdminAuth(req){ if(!BETA_ADMIN_KEY) return false; return secretoValido(req.headers['x-admin-key'], BETA_ADMIN_KEY) }
 function safeStr(v, max){ if(typeof v !== 'string') return ''; return v.slice(0, max) }
 function getClientIp(req){
   if(TRUST_PROXY){
@@ -1067,7 +1165,6 @@ function getPrivacy(pidLower){
   return (p && p.privacy) || { ...DEFAULT_PRIVACY }
 }
 
-// friends_of_friends helper: devuelve true si viewer y target comparten al menos un amigo.
 function _isFriendOfFriend(observerLower, targetLower){
   if(!observerLower) return false
   if(observerLower === targetLower) return true
@@ -1078,7 +1175,6 @@ function _isFriendOfFriend(observerLower, targetLower){
   return false
 }
 
-// Resuelve si el viewer puede ver el campo según el nivel de privacy elegido.
 function _privacyAllows(viewerLower, targetLower, value){
   if(viewerLower && viewerLower === targetLower) return true
   if(value === 'everyone') return true
@@ -1189,11 +1285,21 @@ function makeRecoveryCode(){ return `BC-REC-${makeKeyPart()}-${makeKeyPart()}-${
 
 const server = http.createServer(async (req, res) => {
   try { await handleRequest(req, res) }
-  catch(e){ console.error('[bc-presence] error:', e && e.stack || e); try { sendJson(res, 500, { error: 'internal_error' }) } catch(_){} }
+  catch(e){
+    // BodyTooLargeError ya fue respondido por el handler con 413, o llega acá
+    // si el handler no lo atrapó. En ambos casos, no logueamos como error 500.
+    if(e && e.code === 'BODY_TOO_LARGE'){ try { sendJson(res, 413, { error: 'body_too_large' }) } catch(_){}; return }
+    console.error('[bc-presence] error:', e && e.stack || e)
+    try { sendJson(res, 500, { error: 'internal_error' }) } catch(_){}
+  }
 })
 
 async function handleRequest(req, res){
-  const url = new URL(req.url, `http://${req.headers.host}`)
+  // Fallback a "localhost" si el cliente no manda Host (HTTP/1.0, probes,
+  // algunos health checks). Sin esto, new URL() throwea y el request legítimo
+  // se cae con un 500 en vez de procesarse.
+  const hostHeader = req.headers.host || 'localhost'
+  const url = new URL(req.url, `http://${hostHeader}`)
   const ip = getClientIp(req)
   if(req.method === 'OPTIONS'){ sendJson(res, 204, {}); return }
 
@@ -1247,7 +1353,7 @@ async function handleRequest(req, res){
   if(url.pathname === '/beta/check' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
     if(!checkRate(ip, 'betaChecks', RATE_BETA_CHECKS, RATE_BETA_WINDOW_MS)){ sendJson(res, 429, { error: 'rate limited' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const key = safeStr(body.key, 32).trim().toUpperCase()
     const clientId = safeStr(body.clientId, 64)
     const nickname = safeStr(body.nickname, 25).trim()
@@ -1266,7 +1372,7 @@ async function handleRequest(req, res){
     if(!BETA_ADMIN_KEY){ sendJson(res, 403, { error: 'admin_disabled' }); return }
     if(!checkAdminAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
     if(!checkRate(ip, 'adminActions', RATE_ADMIN_ACTIONS, RATE_ADMIN_WINDOW_MS)){ sendJson(res, 429, { error: 'rate limited' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const count = Math.min(200, Math.max(1, parseInt(body.count, 10) || 1))
     const notes = safeStr(body.notes, 100)
     const generated = []
@@ -1288,7 +1394,7 @@ async function handleRequest(req, res){
     if(!BETA_ADMIN_KEY){ sendJson(res, 403, { error: 'admin_disabled' }); return }
     if(!checkAdminAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
     if(!checkRate(ip, 'adminActions', RATE_ADMIN_ACTIONS, RATE_ADMIN_WINDOW_MS)){ sendJson(res, 429, { error: 'rate limited' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const key = safeStr(body.key, 32).trim().toUpperCase()
     if(!key){ sendJson(res, 400, { error: 'missing_key' }); return }
     if(!betaKeys.has(key)){ sendJson(res, 404, { error: 'not_found' }); return }
@@ -1317,17 +1423,19 @@ async function handleRequest(req, res){
     if(!BETA_ADMIN_KEY){ sendJson(res, 403, { error: 'admin_disabled' }); return }
     if(!checkAdminAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
     if(!checkRate(ip, 'adminActions', RATE_ADMIN_ACTIONS, RATE_ADMIN_WINDOW_MS)){ sendJson(res, 429, { error: 'rate limited' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const clientId = safeStr(body.clientId, 64), reason = safeStr(body.reason, 120)
     if(!clientId){ sendJson(res, 400, { error: 'missing_clientId' }); return }
     const u = users.get(clientId); if(!u){ sendJson(res, 404, { error: 'user_not_found' }); return }
     u.blocked = true; u.blockReason = reason || 'Bloqueado por el administrador'
     users.set(clientId, u); scheduleSaveUsers()
-    // Cerrar SSE activos.
+    // Cerrar SSE activos + desvincular de cualquier party activa.
     if(u.playerId){
       const pidLower = playerIdL(u.playerId)
       const clients = sseClients.get(pidLower)
       if(clients){ for(const r of clients){ try { r.end() } catch(_){} } sseClients.delete(pidLower) }
+      const party = getPartyForPlayer(pidLower)
+      if(party){ removeMemberFromParty(party, pidLower, 'blocked') }
     }
     sendJson(res, 200, { ok: true }); return
   }
@@ -1335,7 +1443,7 @@ async function handleRequest(req, res){
     if(!BETA_ADMIN_KEY){ sendJson(res, 403, { error: 'admin_disabled' }); return }
     if(!checkAdminAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
     if(!checkRate(ip, 'adminActions', RATE_ADMIN_ACTIONS, RATE_ADMIN_WINDOW_MS)){ sendJson(res, 429, { error: 'rate limited' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const clientId = safeStr(body.clientId, 64)
     if(!clientId){ sendJson(res, 400, { error: 'missing_clientId' }); return }
     const u = users.get(clientId); if(!u){ sendJson(res, 404, { error: 'user_not_found' }); return }
@@ -1347,7 +1455,7 @@ async function handleRequest(req, res){
     if(!BETA_ADMIN_KEY){ sendJson(res, 403, { error: 'admin_disabled' }); return }
     if(!checkAdminAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
     if(!checkRate(ip, 'adminActions', RATE_ADMIN_ACTIONS, RATE_ADMIN_WINDOW_MS)){ sendJson(res, 429, { error: 'rate limited' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const clientId = safeStr(body.clientId, 64), notes = safeStr(body.notes, 200)
     if(!clientId){ sendJson(res, 400, { error: 'missing_clientId' }); return }
     const u = users.get(clientId); if(!u){ sendJson(res, 404, { error: 'user_not_found' }); return }
@@ -1358,7 +1466,7 @@ async function handleRequest(req, res){
     if(!BETA_ADMIN_KEY){ sendJson(res, 403, { error: 'admin_disabled' }); return }
     if(!checkAdminAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
     if(!checkRate(ip, 'adminActions', RATE_ADMIN_ACTIONS, RATE_ADMIN_WINDOW_MS)){ sendJson(res, 429, { error: 'rate limited' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const targetPidRaw = safeStr(body.playerId, 32)
     const newRoleRaw   = safeStr(body.role, 32)
     if(!targetPidRaw){ sendJson(res, 400, { error: 'missing_playerId' }); return }
@@ -1379,7 +1487,7 @@ async function handleRequest(req, res){
     if(!BETA_ADMIN_KEY){ sendJson(res, 403, { error: 'admin_disabled' }); return }
     if(!checkAdminAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
     if(!checkRate(ip, 'adminActions', RATE_ADMIN_ACTIONS, RATE_ADMIN_WINDOW_MS)){ sendJson(res, 429, { error: 'rate limited' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const clientId = safeStr(body.clientId, 64)
     if(!clientId){ sendJson(res, 400, { error: 'missing_clientId' }); return }
     const u = users.get(clientId); if(!u){ sendJson(res, 404, { error: 'user_not_found' }); return }
@@ -1387,6 +1495,8 @@ async function handleRequest(req, res){
       const pidLower = playerIdL(u.playerId)
       const clients = sseClients.get(pidLower)
       if(clients){ for(const r of clients){ try { r.end() } catch(_){} } sseClients.delete(pidLower) }
+      const party = getPartyForPlayer(pidLower)
+      if(party){ removeMemberFromParty(party, pidLower, 'deleted') }
     }
     users.delete(clientId); scheduleSaveUsers()
     sendJson(res, 200, { ok: true }); return
@@ -1404,6 +1514,15 @@ async function handleRequest(req, res){
     sendJson(res, 200, { players: list, total: list.length }); return
   }
   if(url.pathname === '/admin' && req.method === 'GET'){
+    // El panel se sirve solo si el admin key viene en el querystring o en el
+    // header. El front sigue pidiendo la key igual para llamar a /admin/*,
+    // pero al menos no exponemos la estructura del panel a cualquiera que
+    // pegue al puerto.
+    const adminKey = safeStr(url.searchParams.get('k') || req.headers['x-admin-key'] || '', 128)
+    if(!BETA_ADMIN_KEY || !secretoValido(adminKey, BETA_ADMIN_KEY)){
+      sendHtml(res, 401, '<h2>401 — Falta o es inválida la admin key. Pasala como ?k=TU_KEY o header x-admin-key.</h2>')
+      return
+    }
     try {
       const st = fs.statSync(ADMIN_HTML_PATH)
       if(!_adminHtmlCache || _adminHtmlCache.mtime !== st.mtimeMs){
@@ -1420,7 +1539,7 @@ async function handleRequest(req, res){
   if(url.pathname === '/heartbeat' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
     if(!checkRate(ip, 'heartbeats', RATE_HEARTBEAT_MAX, RATE_HEARTBEAT_WINDOW_MS)){ sendJson(res, 429, { error: 'rate limited' }); return }
-    let payload; try { payload = JSON.parse((await readBody(req)) || '{}') } catch(e){ sendJson(res, 400, { error: 'bad json' }); return }
+    let payload; try { payload = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const nick = safeStr(payload.nick, 25).trim()
     if(!nick){ sendJson(res, 400, { error: 'missing nick' }); return }
     if(!checkNickLimit(ip, nick.toLowerCase())){ sendJson(res, 429, { error: 'too many nicks' }); return }
@@ -1453,6 +1572,7 @@ async function handleRequest(req, res){
     const prevRoomId = prev ? prev.roomId : null
 
     presence.set(nkLower, { nick, roomId: roomId || null, roomName: roomName || null, clientId, playerId: playerIdRaw, haxballPlayerId, ip, updatedAt: now() })
+    _indexPresence(nkLower, { playerId: playerIdRaw })
     touchUser(clientId, { nickname: nick, playerId: playerIdRaw, key: betaKey, ip, lat: typeof payload.lat === 'number' ? payload.lat : null, lon: typeof payload.lon === 'number' ? payload.lon : null, accuracy: typeof payload.accuracy === 'number' ? payload.accuracy : null })
 
     let pidLower = null
@@ -1519,9 +1639,14 @@ async function handleRequest(req, res){
   }
   if(url.pathname === '/leave' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
-    let payload; try { payload = JSON.parse((await readBody(req)) || '{}') } catch(e){ payload = {} }
+    let payload; try { payload = parseJsonBody(await readBody(req)) } catch(e){ payload = {} }
     const nk = nickL(payload.nick)
-    if(nk){ presence.delete(nk); const s = ipStats.get(normalizeIp(ip)); if(s) s.nicks.delete(nk) }
+    if(nk){
+      presence.delete(nk)
+      _unindexPresence(nk)
+      const s = ipStats.get(normalizeIp(ip))
+      if(s) s.nicks.delete(nk)
+    }
     sendJson(res, 200, { ok: true }); return
   }
 
@@ -1552,7 +1677,7 @@ async function handleRequest(req, res){
   // ─────────────────────────────────────────────────────────
   if(url.pathname === '/friends/request' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const fromRaw = safeStr(body.fromPlayerId || body.nick, 32)
     const toRaw   = safeStr(body.toPlayerId || body.friendNick, 32)
     const fromP = findPlayerByAnyId(fromRaw)
@@ -1583,7 +1708,7 @@ async function handleRequest(req, res){
 
   if(url.pathname === '/friends/add' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const fromRaw = safeStr(body.fromPlayerId || body.nick, 32)
     const toRaw   = safeStr(body.toPlayerId || body.friendNick, 32)
     const fromP = findPlayerByAnyId(fromRaw)
@@ -1604,7 +1729,7 @@ async function handleRequest(req, res){
 
   if(url.pathname === '/friends/accept' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const meRaw = safeStr(body.playerId || body.nick, 32)
     const fromRaw = safeStr(body.fromPlayerId || body.friendNick, 32)
     const me = findPlayerByAnyId(meRaw)
@@ -1626,7 +1751,7 @@ async function handleRequest(req, res){
 
   if(url.pathname === '/friends/decline' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const meRaw = safeStr(body.playerId || body.nick, 32)
     const fromRaw = safeStr(body.fromPlayerId || body.friendNick, 32)
     const me = findPlayerByAnyId(meRaw)
@@ -1644,7 +1769,7 @@ async function handleRequest(req, res){
 
   if(url.pathname === '/friends/remove' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const me = findPlayerByAnyId(safeStr(body.playerId || body.nick, 32))
     const other = findPlayerByAnyId(safeStr(body.friendPlayerId || body.friendNick, 32))
     if(!me || !other){ sendJson(res, 404, { error: 'player_not_found' }); return }
@@ -1654,7 +1779,7 @@ async function handleRequest(req, res){
 
   if(url.pathname === '/friends/favorite' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const me = findPlayerByAnyId(safeStr(body.playerId, 32))
     const friend = findPlayerByAnyId(safeStr(body.friendPlayerId, 32))
     if(!me || !friend){ sendJson(res, 404, { error: 'player_not_found' }); return }
@@ -1722,7 +1847,7 @@ async function handleRequest(req, res){
 
     let clients = sseClients.get(me.idLower)
     if(!clients) clients = new Set()
-    if(clients.size >= RATE_SSE_CONNECTIONS){
+    if(clients.size >= MAX_SSE_CONNECTIONS_PER_PLAYER){
       const oldest = clients.values().next().value
       try { oldest.end() } catch(_){}
       clients.delete(oldest)
@@ -1770,7 +1895,7 @@ async function handleRequest(req, res){
   }
   if(url.pathname === '/notifications/read' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const me = findPlayerByAnyId(safeStr(body.playerId || body.nick, 32))
     if(!me){ sendJson(res, 404, { error: 'player_not_found' }); return }
     const ids = body.all === true ? 'all' : (Array.isArray(body.ids) ? body.ids.map(String) : [])
@@ -1783,7 +1908,7 @@ async function handleRequest(req, res){
   // ─────────────────────────────────────────────────────────
   if(url.pathname === '/invite/play' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const fromP = findPlayerByAnyId(safeStr(body.fromPlayerId || body.from, 32))
     const toP   = findPlayerByAnyId(safeStr(body.toPlayerId || body.to, 32))
     if(!fromP || !toP){ sendJson(res, 404, { error: 'player_not_found' }); return }
@@ -1815,7 +1940,7 @@ async function handleRequest(req, res){
   }
   if(url.pathname === '/privacy' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const me = findPlayerByAnyId(safeStr(body.playerId || body.nick, 32))
     if(!me){ sendJson(res, 404, { error: 'player_not_found' }); return }
     if(!checkPlayerIdRate(me.idLower, 'privacyUpdates', RATE_PRIVACY_UPDATES, RATE_PRIVACY_UPDATES_WINDOW_MS)){ sendJson(res, 429, { error: 'rate limited' }); return }
@@ -1832,7 +1957,7 @@ async function handleRequest(req, res){
   // ─────────────────────────────────────────────────────────
   if(url.pathname === '/clans/create' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const nk = nickL(body.nick), name = safeStr(body.name, 32).trim(), tag = safeStr(body.tag, 5).trim().toUpperCase()
     if(!nk || !name){ sendJson(res, 400, { error: 'faltan datos' }); return }
     for(const [, c] of clans){ if(c.members.has(nk)){ sendJson(res, 409, { error: 'already_in_clan' }); return } }
@@ -1843,7 +1968,7 @@ async function handleRequest(req, res){
   }
   if(url.pathname === '/clans/join' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const nk = nickL(body.nick), clanId = safeStr(body.clanId, 32)
     if(!nk || !clanId){ sendJson(res, 400, { error: 'faltan datos' }); return }
     const clan = clans.get(clanId); if(!clan){ sendJson(res, 404, { error: 'not_found' }); return }
@@ -1853,7 +1978,7 @@ async function handleRequest(req, res){
   }
   if(url.pathname === '/clans/leave' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const nk = nickL(body.nick)
     if(!nk){ sendJson(res, 400, { error: 'missing nick' }); return }
     for(const [cid, c] of clans){ if(c.members.has(nk)){ c.members.delete(nk); if(!c.members.size) clans.delete(cid); else if(c.owner === nk) c.owner = [...c.members][0] } }
@@ -1870,7 +1995,7 @@ async function handleRequest(req, res){
   // ─────────────────────────────────────────────────────────
   if(url.pathname === '/voice/join' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const nk = nickL(body.nick), roomId = safeStr(body.roomId, 128), muted = !!body.muted
     if(!nk || !roomId){ sendJson(res, 400, { error: 'faltan datos' }); return }
     for(const [rid, ch] of voiceChannels){ if(rid !== roomId) ch.delete(nk); if(!ch.size && rid !== roomId) voiceChannels.delete(rid) }
@@ -1880,7 +2005,7 @@ async function handleRequest(req, res){
   }
   if(url.pathname === '/voice/leave' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const nk = nickL(body.nick)
     if(!nk){ sendJson(res, 400, { error: 'missing nick' }); return }
     for(const [rid, ch] of voiceChannels){ ch.delete(nk); if(!ch.size) voiceChannels.delete(rid) }
@@ -1898,7 +2023,7 @@ async function handleRequest(req, res){
   if(url.pathname === '/voice/signal' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
     if(!checkRate(ip, 'voiceSignals', RATE_MAX_VOICE_SIGNALS, 1000)){ sendJson(res, 429, { error: 'rate limited' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const from = safeStr(body.from, 25), to = nickL(body.to), type = safeStr(body.type, 16), payload = body.payload
     if(!from || !to || !type){ sendJson(res, 400, { error: 'faltan datos' }); return }
     if(!['offer','answer','ice'].includes(type)){ sendJson(res, 400, { error: 'bad_type' }); return }
@@ -1947,7 +2072,10 @@ async function handleRequest(req, res){
   if(url.pathname === '/user/avatar' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
     if(!checkRate(ip, 'avatarUploads', RATE_AVATAR_UPLOADS, RATE_AVATAR_WINDOW_MS)){ sendJson(res, 429, { error: 'rate limited' }); return }
-    let body; try { body = JSON.parse((await readBody(req, MAX_AVATAR_BYTES + 4096)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req, MAX_AVATAR_BYTES + 4096)) } catch(e){
+      if(e && e.code === 'BODY_TOO_LARGE'){ sendJson(res, 413, { error: 'too_large' }); return }
+      sendJson(res, e.status || 400, { error: 'bad_json' }); return
+    }
     const nk = profileKeyFor({ playerId: safeStr(body.playerId, 32), nick: body.nick })
     const imageData = typeof body.imageData === 'string' ? body.imageData : ''
     if(!nk){ sendJson(res, 400, { error: 'missing nick' }); return }
@@ -1973,7 +2101,7 @@ async function handleRequest(req, res){
   if(url.pathname === '/user/profile' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
     if(!checkRate(ip, 'profileUpdates', RATE_PROFILE_UPDATES, RATE_PROFILE_WINDOW_MS)){ sendJson(res, 429, { error: 'rate limited' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const nk = profileKeyFor({ playerId: safeStr(body.playerId, 32), nick: body.nick })
     if(!nk){ sendJson(res, 400, { error: 'missing nick' }); return }
     const prev = userProfiles.get(nk) || { avatarColor: null, banner: null, bio: '', updatedAt: 0 }
@@ -2011,7 +2139,7 @@ async function handleRequest(req, res){
   if(url.pathname === '/player/check-id' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
     if(!checkRate(ip, 'playerChecks', RATE_PLAYER_CHECKS, RATE_PLAYER_WINDOW_MS)){ sendJson(res, 429, { error: 'rate limited' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const v = validatePlayerId(body.id)
     if(!v.ok){ sendJson(res, 200, { available: false, reason: v.reason }); return }
     if(players.has(v.lower)){ sendJson(res, 200, { available: false, reason: 'taken' }); return }
@@ -2020,7 +2148,7 @@ async function handleRequest(req, res){
   if(url.pathname === '/player/register' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
     if(!checkRate(ip, 'playerChecks', RATE_PLAYER_CHECKS, RATE_PLAYER_WINDOW_MS)){ sendJson(res, 429, { error: 'rate limited' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const clientId = safeStr(body.clientId, 64)
     if(!clientId){ sendJson(res, 400, { error: 'missing_client_id' }); return }
     if(isBlocked(clientId)){ sendJson(res, 403, { error: 'blocked' }); return }
@@ -2042,7 +2170,7 @@ async function handleRequest(req, res){
   }
   if(url.pathname === '/player/set-nickname' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const clientId = safeStr(body.clientId, 64)
     if(!clientId){ sendJson(res, 400, { error: 'missing_client_id' }); return }
     const player = getPlayerByClientId(clientId)
@@ -2060,7 +2188,7 @@ async function handleRequest(req, res){
   // Alias por playerId (usado por el cliente actual)
   if(url.pathname === '/player/update-nick' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const pidRaw = safeStr(body.playerId, 32)
     const player = pidRaw ? players.get(playerIdL(pidRaw)) : null
     if(!player){ sendJson(res, 404, { error: 'player_not_found' }); return }
@@ -2115,7 +2243,7 @@ async function handleRequest(req, res){
   if(url.pathname === '/player/recover' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
     if(!checkRate(ip, 'playerChecks', RATE_PLAYER_CHECKS, RATE_PLAYER_WINDOW_MS)){ sendJson(res, 429, { error: 'rate limited' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const clientId = safeStr(body.clientId, 64), code = safeStr(body.recoveryCode, 64).trim().toUpperCase()
     if(!clientId || !code){ sendJson(res, 400, { error: 'missing_fields' }); return }
     if(isBlocked(clientId)){ sendJson(res, 403, { error: 'blocked' }); return }
@@ -2135,7 +2263,7 @@ async function handleRequest(req, res){
   // ─────────────────────────────────────────────────────────
   if(url.pathname === '/party/create' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const me = findPlayerByAnyId(safeStr(body.playerId, 32))
     if(!me){ sendJson(res, 404, { error: 'player_not_found' }); return }
     if(!checkPlayerIdRate(me.idLower, 'partyCreates', RATE_PARTY_CREATES, RATE_PARTY_CREATES_WINDOW_MS)){ sendJson(res, 429, { error: 'rate limited' }); return }
@@ -2153,7 +2281,7 @@ async function handleRequest(req, res){
   }
   if(url.pathname === '/party/invite' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const me = findPlayerByAnyId(safeStr(body.playerId, 32))
     const target = findPlayerByAnyId(safeStr(body.targetPlayerId, 32))
     if(!me || !target){ sendJson(res, 404, { error: 'player_not_found' }); return }
@@ -2170,7 +2298,7 @@ async function handleRequest(req, res){
   }
   if(url.pathname === '/party/accept' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const me = findPlayerByAnyId(safeStr(body.playerId, 32))
     const partyId = safeStr(body.partyId, 64)
     if(!me || !partyId){ sendJson(res, 400, { error: 'missing_fields' }); return }
@@ -2189,7 +2317,7 @@ async function handleRequest(req, res){
   }
   if(url.pathname === '/party/decline' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const me = findPlayerByAnyId(safeStr(body.playerId, 32))
     const partyId = safeStr(body.partyId, 64)
     if(!me || !partyId){ sendJson(res, 400, { error: 'missing_fields' }); return }
@@ -2200,7 +2328,7 @@ async function handleRequest(req, res){
   }
   if(url.pathname === '/party/leave' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const me = findPlayerByAnyId(safeStr(body.playerId, 32))
     if(!me){ sendJson(res, 404, { error: 'player_not_found' }); return }
     const party = getPartyForPlayer(me.idLower)
@@ -2212,7 +2340,7 @@ async function handleRequest(req, res){
   }
   if(url.pathname === '/party/kick' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const me = findPlayerByAnyId(safeStr(body.playerId, 32))
     const target = findPlayerByAnyId(safeStr(body.targetPlayerId, 32))
     if(!me || !target){ sendJson(res, 404, { error: 'player_not_found' }); return }
@@ -2228,7 +2356,7 @@ async function handleRequest(req, res){
   }
   if(url.pathname === '/party/promote' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const me = findPlayerByAnyId(safeStr(body.playerId, 32))
     const newLeader = findPlayerByAnyId(safeStr(body.newLeaderId, 32))
     if(!me || !newLeader){ sendJson(res, 404, { error: 'player_not_found' }); return }
@@ -2263,11 +2391,10 @@ async function handleRequest(req, res){
   if(db && url.pathname === '/match/start' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
     if(!checkRate(ip, 'matchCalls', RATE_MATCH_CALLS, RATE_MATCH_WINDOW_MS)){ sendJson(res, 429, { error: 'rate limited' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const roomId = safeStr(body.roomId, 128), roomName = safeStr(body.roomName, 80), stadium = safeStr(body.stadium, 80)
     const playersList = Array.isArray(body.players) ? body.players.slice(0, 30) : []
     if(!roomId){ sendJson(res, 400, { error: 'missing_roomId' }); return }
-    // Evitar duplicados en la misma sala (reconexión del reporter sin gameEnd).
     const prev = activeMatches.get(roomId)
     if(prev){
       console.warn(`[stats] /match/start duplicado en room ${roomId}; cerrando match previo #${prev.matchId}`)
@@ -2292,7 +2419,7 @@ async function handleRequest(req, res){
   if(db && url.pathname === '/match/goal' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
     if(!checkRate(ip, 'matchCalls', RATE_MATCH_CALLS, RATE_MATCH_WINDOW_MS)){ sendJson(res, 429, { error: 'rate limited' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const matchId = parseInt(body.matchId, 10)
     const teamId = typeof body.teamId === 'number' ? body.teamId : null
     const scorerId = safeStr(body.scorerId, 32) || null
@@ -2307,11 +2434,10 @@ async function handleRequest(req, res){
   if(db && url.pathname === '/match/end' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
     if(!checkRate(ip, 'matchCalls', RATE_MATCH_CALLS, RATE_MATCH_WINDOW_MS)){ sendJson(res, 429, { error: 'rate limited' }); return }
-    let body; try { body = JSON.parse((await readBody(req)) || '{}') } catch(e){ body = {} }
+    let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
     const matchId = parseInt(body.matchId, 10), scoreRed = parseInt(body.scoreRed, 10) || 0, scoreBlue = parseInt(body.scoreBlue, 10) || 0
     const roomIdRaw = safeStr(body.roomId, 128)
     if(!matchId){ sendJson(res, 400, { error: 'missing_matchId' }); return }
-    // Transacción: si falla a mitad, no quedan stats parciales.
     const _tx = (db && typeof db.withTransaction === 'function')
       ? db.withTransaction
       : (async (fn) => fn(db.pool))
@@ -2459,9 +2585,9 @@ server.on('error', (err) => {
   process.exit(1)
 })
 
-server.listen(PORT, () => {
-  console.log(`[bc-presence] escuchando en :${PORT}`)
-  console.log(`[bc-presence] admin: http://localhost:${PORT}/admin`)
+server.listen(PORT, BIND_HOST, () => {
+  console.log(`[bc-presence] escuchando en ${BIND_HOST}:${PORT}`)
+  console.log(`[bc-presence] admin: http://${BIND_HOST}:${PORT}/admin?k=TU_KEY`)
   console.log(`[bc-presence] TRUST_PROXY=${TRUST_PROXY ? '1' : '0'}`)
   console.log(`[bc-presence] avatares ${userAvatars.size} · perfiles ${userProfiles.size} · betaKeys ${betaKeys.size} · users ${users.size} · players ${players.size} · clanes ${clans.size} · amistades ${friendships.size}`)
   console.log(`[bc-presence] notificaciones persistentes: ${notificationsPersistent.size} jugadores`)
