@@ -43,6 +43,7 @@
 
 const { Pool } = require('pg')
 const { AsyncLocalStorage } = require('async_hooks')
+const { clear } = require('console')
 
 const PG_PASSWORD = process.env.PGPASSWORD
 if (!PG_PASSWORD) {
@@ -159,6 +160,9 @@ async function _doEnsureSchema() {
      )`,
     `CREATE INDEX IF NOT EXISTS idx_matches_room_ended ON matches(room_id, ended_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_matches_ended ON matches(ended_at DESC)`,
+    // Idempotencia de /match/start: un solo match abierto por room. Sin esto,
+    // dos POST concurrentes crean dos matches con ended_at = NULL.
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_matches_open_per_room ON matches(room_id) WHERE ended_at IS NULL`,
 
     // ── match_players ──
     `CREATE TABLE IF NOT EXISTS match_players (
