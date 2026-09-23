@@ -9,16 +9,9 @@
  *                      nombres_reservados, players_bans, bot_state).
  *   · Schema init idempotente (ensureSchema). Se llama una vez al arranque.
  *   · Toda query va parametrizada — nada de concatenación de strings.
- *   · Todos los accessors abren cliente, ejecutan y liberan en finally. Nada
- *     de conexiones colgadas.
+ *   · Todos los accessors abren cliente, ejecutan y liberan en finally.
  *   · El Logger escribe a logs/<file>.log con rotación por tamaño. NO reasigna
- *     console.* global — eso era un bug (recursión infinita, stack overflow).
- *
- * Convenciones de naming:
- *   · key del jugador → mismo valor que getPlayerKey() en index.js
- *                       (auth Haxball | anon_conn_X | anon_nombre).
- *   · roomId         → identificador de la sala (ej. "HA", "HA2").
- *   · data JSONB     → blob serializado del estado del jugador en index.js.
+ *     console.* global.
  */
 require("dotenv").config({ path: process.env.ENV_FILE || ".env" });
 const fs = require("fs").promises;
@@ -35,12 +28,7 @@ const MAX_BATCH_SIZE = 500;
 const BACKUP_DEFAULT_KEEP = 20;
 
 // ============================================================
-// LOGGER — arreglo crítico del bug de recursión infinita.
-// El archivo original tenía:
-//     const Logger = { info: (msg) => Logger.info(`[DB] ${msg}`) };
-//     console.log = Logger.info;
-// Lo cual producía stack overflow en el primer console.log. Ahora el Logger
-// escribe directamente a archivo y NO toca console.* global.
+// LOGGER
 // ============================================================
 if (!fsSync.existsSync(LOG_DIR)) fsSync.mkdirSync(LOG_DIR, { recursive: true });
 
@@ -116,7 +104,6 @@ function getGlobalPool() {
 
 // ============================================================
 // HELPERS DE CONEXIÓN
-// Los wrappers abren/liberan el cliente y propagan cualquier error.
 // ============================================================
 async function withClient(fn) {
     const client = await getPool().connect();
@@ -127,29 +114,12 @@ async function withGlobalClient(fn) {
     try { return await fn(client); } finally { client.release(); }
 }
 
-// Ejecuta un query con log de errores (no swallow silencioso).
-async function safeQuery(client, sql, params = [], ctx = "query") {
-    try {
-        return await client.query(sql, params);
-    } catch (e) {
-        Logger.error(`Error en ${ctx}: ${e.message}`, e);
-        throw e;
-    }
-}
-
 // ============================================================
 // SCHEMA INIT
 //
-// IMPORTANTE — cada tabla va en el pool que le corresponde por diseño:
+// IMPORTANTE — cada tabla va en el pool que le corresponde:
 //   · poolSala   → players, records, clanes, backups, admins_auto
 //   · poolGlobal → player_globals, nombres_reservados, players_bans, bot_state
-//
-// BUG CORREGIDO: `admins_auto` estaba creada dentro del bloque
-// `withGlobalClient`, pero TODAS sus operaciones (loadDatabase, agregarAdminAuto,
-// quitarAdminAuto, fetchAdminsAuto) usan `withClient` (pool de sala). Como
-// PGDATABASE y PGDATABASE_GLOBAL apuntan a bases distintas, la tabla se creaba
-// en un lado y se leía en el otro → error 42P01 "relation admins_auto does not
-// exist" al arrancar. Ahora se crea en el pool correcto.
 // ============================================================
 async function ensureSchema() {
     if (schemaListo) return;
@@ -188,8 +158,6 @@ async function ensureSchema() {
         );`);
         await c.query(`CREATE INDEX IF NOT EXISTS idx_backups_room_date ON backups(room_id, created_at DESC);`);
 
-        // admins_auto — ANTES estaba por error en el pool global. Acá es donde
-        // corresponde: es local a cada sala.
         await c.query(`CREATE TABLE IF NOT EXISTS admins_auto (
             auth         TEXT PRIMARY KEY,
             agregado_por TEXT,
@@ -256,7 +224,6 @@ async function ensureSchema() {
 async function loadDatabase(STATE, roomId) {
     await ensureSchema();
 
-    // Players (data blob por key).
     const { rows: pRows } = await withClient(c => c.query(
         `SELECT key, data FROM players WHERE room_id = $1 OR room_id IS NULL;`,
         [roomId]
@@ -264,20 +231,17 @@ async function loadDatabase(STATE, roomId) {
     STATE.baseDatos = {};
     for (const r of pRows) STATE.baseDatos[r.key] = r.data;
 
-    // Records de la sala.
     const { rows: rRows } = await withClient(c => c.query(
         `SELECT data FROM records WHERE room_id = $1;`, [roomId]
     ));
     STATE.records = rRows[0]?.data || {};
 
-    // Clanes de la sala.
     const { rows: cRows } = await withClient(c => c.query(
         `SELECT id, data FROM clanes WHERE room_id = $1 OR room_id IS NULL;`, [roomId]
     ));
     STATE.clanes = {};
     for (const r of cRows) STATE.clanes[r.id] = r.data;
 
-    // Admins automáticos (locales a la sala).
     const { rows: aRows } = await withClient(c => c.query(
         `SELECT auth FROM admins_auto WHERE room_id = $1 OR room_id IS NULL;`, [roomId]
     ));
@@ -289,13 +253,18 @@ async function loadDatabase(STATE, roomId) {
 
 /**
  * Guarda el estado a Postgres.
- * — Solo toca los keys marcados como dirty; si fullDiffPendiente está en true,
- *   hace full scan (para cuando se actualizó algo masivo: nueva temporada, etc).
- * — Batchea los players en chunks de MAX_BATCH_SIZE para no exceder el límite
- *   de parámetros de Postgres (65535 en la mayoría de builds).
- * — Limpia las marcas de dirty ANTES de escribir: si la escritura falla, los
- *   keys vuelven a quedar sucios en el catch. Este patrón evita perder updates
- *   si el proceso crashea a mitad de un batch grande.
+ *
+ * FIX (scanner_yyerror): antes el `NOW()` se agregaba UNA sola vez al final del
+ * VALUES, mientras que cada tupla aportaba 3 valores ($key, $data, $room_id)
+ * cuando la lista de columnas declara 4 (key, data, room_id, updated_at). Eso
+ * generaba SQL inválido del tipo:
+ *     INSERT INTO players (key, data, room_id, updated_at)
+ *     VALUES ($1, $2::jsonb, $3), ($4, $5::jsonb, $6), ..., NOW()
+ * Postgres parsea las tuplas y al llegar al `, NOW()` explota con
+ * `syntax error at or near "NOW"` y `scanner_yyerror` (código 42601).
+ *
+ * La solución es meter `NOW()` DENTRO de cada tupla, y sacar el `, NOW()` suelto
+ * del final del template string.
  */
 async function saveDatabase(STATE, roomId) {
     await ensureSchema();
@@ -311,7 +280,7 @@ async function saveDatabase(STATE, roomId) {
         [roomId, JSON.stringify(STATE.records || {})]
     ));
 
-    // Clanes — un upsert por clan (bajo volumen, no hace falta batch).
+    // Clanes
     for (const [id, data] of Object.entries(STATE.clanes || {})) {
         await withClient(c => c.query(
             `INSERT INTO clanes (id, data, room_id, updated_at) VALUES ($1, $2::jsonb, $3, NOW())
@@ -333,22 +302,24 @@ async function saveDatabase(STATE, roomId) {
         const chunk = keysDirty.slice(i, i + MAX_BATCH_SIZE);
         const rows = chunk.map(k => [k, JSON.stringify(STATE.baseDatos[k] || {}), roomId]);
 
+        // Cada tupla = ($key, $data::jsonb, $room_id, NOW())
+        // — 4 valores por fila para que matcheen las 4 columnas.
         const values = rows.map((_, idx) => {
             const b = idx * 3;
-            return `($${b + 1}, $${b + 2}::jsonb, $${b + 3})`;
+            return `($${b + 1}, $${b + 2}::jsonb, $${b + 3}, NOW())`;
         }).join(",");
         const params = rows.flat();
 
         try {
             await withClient(c => c.query(
-                `INSERT INTO players (key, data, room_id, updated_at) VALUES ${values.replace(/\$(\d+)/g, (m, n) => `$${n}`)}, NOW()
+                `INSERT INTO players (key, data, room_id, updated_at)
+                 VALUES ${values}
                  ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW();`,
                 params
             ));
             escritos += chunk.length;
         } catch (e) {
             Logger.error(`Falló batch de players (chunk ${i}..${i + chunk.length})`, e);
-            // Dejamos esos keys como dirty para reintentar en el próximo ciclo.
             for (const k of chunk) STATE.dirtyPlayers?.add?.(k);
             throw e;
         }
@@ -360,11 +331,6 @@ async function saveDatabase(STATE, roomId) {
     return escritos;
 }
 
-/**
- * Backup completo del estado + poda de backups antiguos.
- * Guarda el blob entero (todos los players + records + clanes) como un único
- * JSON. Si el volumen crece mucho, cambiar por snapshot por tabla.
- */
 async function backupDatabase(STATE, keep = BACKUP_DEFAULT_KEEP, roomId) {
     await ensureSchema();
     const snapshot = {
@@ -381,11 +347,12 @@ async function backupDatabase(STATE, keep = BACKUP_DEFAULT_KEEP, roomId) {
         [roomId, JSON.stringify(snapshot)]
     ));
 
-    // Poda: conservar los últimos `keep`.
+    // Poda: conservar los últimos `keep`. Orden por created_at + id como
+    // desempate por si dos backups caen en el mismo microsegundo.
     await withClient(c => c.query(
         `DELETE FROM backups WHERE id IN (
             SELECT id FROM backups WHERE room_id = $1
-            ORDER BY created_at DESC OFFSET $2
+            ORDER BY created_at DESC, id DESC OFFSET $2
         );`,
         [roomId, keep]
     ));
@@ -419,10 +386,6 @@ async function liberarNombreReservado(nombre) {
     ));
 }
 
-/**
- * Libera reservas huérfanas: entradas en nombres_reservados cuyo owner_key
- * ya no existe en players. Se llama al arranque.
- */
 async function liberarReservasHuerfanas(keysVivas) {
     await ensureSchema();
     if (!Array.isArray(keysVivas) || !keysVivas.length) return 0;
@@ -434,7 +397,7 @@ async function liberarReservasHuerfanas(keysVivas) {
 }
 
 // ============================================================
-// SYNC GLOBAL (bans + reservas)
+// SYNC GLOBAL
 // ============================================================
 async function fetchGlobalSyncData() {
     await ensureSchema();
@@ -499,16 +462,6 @@ async function upsertPlayerBan(key, datos, roomId, _isIpBan = false) {
     ));
 }
 
-/**
- * FIX A: upsert parcial de ban.
- * Solo actualiza las columnas pasadas en `campos`. Antes este método no
- * existía y index.js lo llamaba desde quitarBanGlobal/setBlacklistGlobal,
- * pero sólo podía hacerse vía upsertPlayerBan (que sobrescribe ambos campos).
- * Resultado: liberar un ban borraba la blacklist y viceversa.
- *
- * Whitelist de columnas permitidas para evitar SQL injection por nombre de
- * columna (los valores ya van parametrizados).
- */
 const BAN_COLS_PERMITIDAS = Object.freeze(new Set(["ban_hasta", "blacklisted"]));
 async function upsertPlayerBanParcial(key, campos, roomId) {
     await ensureSchema();
@@ -518,7 +471,6 @@ async function upsertPlayerBanParcial(key, campos, roomId) {
     const cols = entries.map(([k]) => k);
     const vals = entries.map(([, v]) => v);
 
-    // Construye: INSERT ... ON CONFLICT DO UPDATE SET col = EXCLUDED.col
     const insertCols = ["key", ...cols, "room_id", "updated_at"];
     const insertVals = ["$1", ...cols.map((_, i) => `$${i + 2}`), `$${cols.length + 2}`, "NOW()"];
     const updateSet = [...cols.map(c => `${c} = EXCLUDED.${c}`), "room_id = EXCLUDED.room_id", "updated_at = NOW()"].join(", ");
@@ -587,17 +539,6 @@ async function fetchPlayerGlobals() {
 // ============================================================
 // CLANES GLOBAL
 // ============================================================
-/**
- * FIX B: antes `lastSavedClanesGlobal` guardaba una referencia al objeto
- * STATE.clanes. Si el objeto mutaba in-place (que es lo que pasa siempre),
- * la comparación `JSON.stringify(actual) !== JSON.stringify(snapshot)` daba
- * false siempre (los dos apuntaban al mismo objeto). Resultado: los clanes
- * nunca se persistían después de la primera vez.
- *
- * Ahora guardamos un snapshot serializado (string) para forzar comparación
- * por valor. Se mantiene en un módulo-level var porque cada sala tiene su
- * propia instancia de index.js → su propio require de database.js.
- */
 let _lastSavedClanes = null;
 async function saveClanesGlobal(STATE, roomId) {
     await ensureSchema();
@@ -631,7 +572,6 @@ async function deletePlayerLocal(key) {
 async function deletePlayersLocalBatch(keys) {
     await ensureSchema();
     if (!Array.isArray(keys) || !keys.length) return 0;
-    // Chunks para no exceder el límite de parámetros.
     let total = 0;
     for (let i = 0; i < keys.length; i += MAX_BATCH_SIZE) {
         const chunk = keys.slice(i, i + MAX_BATCH_SIZE);
@@ -669,11 +609,6 @@ async function getBotState(key) {
     return rows[0]?.value ?? null;
 }
 
-/**
- * Marca el proceso como apagado en bot_state. Se llama desde shutdown() en
- * index.js para que un supervisor externo (pm2/systemd) sepa que fue un
- * cierre ordenado y no un crash.
- */
 async function marcarProcesoApagado() {
     try {
         await setBotState(`proceso_${process.env.ROOM_ID || "HA"}`, `apagado_${Date.now()}`);
@@ -699,7 +634,6 @@ async function closePool() {
 // EXPORTS
 // ============================================================
 module.exports = {
-    // Ciclo de vida
     loadDatabase,
     saveDatabase,
     backupDatabase,
@@ -708,38 +642,30 @@ module.exports = {
     getPool,
     getGlobalPool,
 
-    // Nombres reservados
     reservarNombre,
     liberarNombreReservado,
     liberarReservasHuerfanas,
     fetchGlobalSyncData,
 
-    // Admins
     agregarAdminAuto,
     quitarAdminAuto,
     fetchAdminsAuto,
 
-    // Bans
     upsertPlayerBan,
     upsertPlayerBanParcial,
 
-    // Player globals
     upsertPlayerGlobals,
     fetchPlayerGlobals,
 
-    // Clanes
     saveClanesGlobal,
 
-    // Delete
     deletePlayerLocal,
     deletePlayersLocalBatch,
     deletePlayerGlobalRow,
 
-    // Bot state
     setBotState,
     getBotState,
     marcarProcesoApagado,
 
-    // Logger (exportado por si index.js quiere reusar)
     Logger,
 };
