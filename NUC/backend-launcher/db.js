@@ -20,18 +20,23 @@
 //   PGSSL_REJECT_UNAUTHORIZED = '0' para aceptar certificados self-signed
 //   PG_APP_NAME         (default: bahiaclient-presence)
 //
-// v2 — Pasada de calidad:
+// v3 — Pasada de calidad:
+//   · ensureSchema(): los DDL con error de permisos (42501 / "must be owner")
+//     ya NO abortan todo el schema. Antes, un CREATE INDEX que no podíamos
+//     crear tiraba la excepción, _schemaReady quedaba en false, y TODAS las
+//     queries subsecuentes fallaban porque query() hace `await ensureSchema()`
+//     sin try/catch. Ahora se loguea un warning y se sigue.
+//   · ensureSchema(): rate limit del log de error (1 cada 60s) para no
+//     inundar si un error permanente ocurre en cada query.
+//   · Diagnóstico: mensaje explícito con el ALTER TABLE necesario si faltan
+//     permisos.
+// v2 — Pasada de calidad previa (sin cambios):
 //   · ensureSchema(): crea las tablas (matches, match_players, goals,
-//     player_totals) + índices. Antes esto no existía y cualquier instalación
-//     limpia crasheaba en el primer /match/start.
-//   · NO process.exit() desde module load. Si falta PGPASSWORD, throw. El
-//     caller (BahiaClient) ya envuelve el require en try/catch y degrada
-//     a stats-disabled — mucho mejor que matar el proceso entero.
-//   · withTransaction(): guard contra anidamiento (usaba otro cliente del
-//     pool y rompía el BEGIN).
-//   · shutdown() exportada (BahiaClient la busca pero no existía).
-//   · testConnection(): reintenta N veces con backoff. Antes, si Postgres
-//     tardaba 1s más que el proceso, stats quedaba deshabilitado para siempre.
+//     player_totals) + índices.
+//   · NO process.exit() desde module load. Si falta PGPASSWORD, throw.
+//   · withTransaction(): guard contra anidamiento con AsyncLocalStorage.
+//   · shutdown() exportada.
+//   · testConnection(): reintenta N veces con backoff.
 //   · _dbErrorCount se resetea en reconnect exitoso.
 //   · Slow-query log con contexto (caller) y sin truncar a ciegas.
 //   · Validación de PGPOOL_MAX (rango 1..100).
@@ -41,9 +46,6 @@ const { AsyncLocalStorage } = require('async_hooks')
 
 const PG_PASSWORD = process.env.PGPASSWORD
 if (!PG_PASSWORD) {
-  // No matamos el proceso: el caller decide qué hacer. BahiaClient envuelve
-  // el require en try/catch y sigue sin stats, que es un modo de operación
-  // válido (para desarrollo, o si las stats son opcionales en ese entorno).
   throw new Error('[db] FALTA PGPASSWORD en el entorno. Seteala en el .env o exportala antes de arrancar.')
 }
 
@@ -55,11 +57,12 @@ function _intEnv(name, def, min, max) {
 }
 
 const POOL_MAX = _intEnv('PGPOOL_MAX', 10, 1, 100)
+const PGUSER = process.env.PGUSER || 'bahiaclient'
 
 const pool = new Pool({
   host: process.env.PGHOST || '127.0.0.1',
   port: _intEnv('PGPORT', 5432, 1, 65535),
-  user: process.env.PGUSER || 'bahiaclient',
+  user: PGUSER,
   password: PG_PASSWORD,
   database: process.env.PGDATABASE || 'bahiaclient',
   max: POOL_MAX,
@@ -84,18 +87,13 @@ pool.on('error', (err) => {
   _dbLastErrorAt = Date.now()
   const code = err.code || err.severity || 'unknown'
   console.error(`[db] error en cliente idle (#${_dbErrorCount}, code=${code}):`, err.message)
-  // Log completo cada 10 errores para no inundar.
   if (_dbErrorCount === 1 || _dbErrorCount % 10 === 0) {
     console.error(`[db] total errores idle: ${_dbErrorCount}, último: ${new Date(_dbLastErrorAt).toISOString()}`)
   }
 })
 
 pool.on('connect', () => {
-  // Reset del contador de errores al recuperar conexión. Sin esto, el contador
-  // crecía indefinidamente aun durante operación normal, y el "cada 10" nunca
-  // reflejaba errores recientes.
   if (_dbErrorCount > 0 && !_dbConnectedOnce) {
-    // primera conexión — no resetea, solo marca
     _dbConnectedOnce = true
   } else if (_dbErrorCount > 0) {
     console.log(`[db] conexión re-establecida, reseteando contador de errores (era ${_dbErrorCount})`)
@@ -117,26 +115,27 @@ async function shutdown(timeoutMs = 5000) {
     ])
     console.log('[db] pool cerrado limpiamente')
   } catch (e) {
-    // No matamos el proceso — BahiaClient decide si sale con 1 o 0.
-    // El shutdown forzado era particularmente agresivo: si Postgres tardaba
-    // 5s en cerrar, el bot se caía con exit code 1 aunque el save ya había
-    // terminado.
     console.warn('[db] shutdown con warning:', e.message)
     throw e
   }
 }
 
 // ── Schema init ──────────────────────────────────────────────────────────
-// Crea las tablas e índices que BahiaClient usa. Idempotente.
-// Lazy: se llama una vez, cachea el resultado, y cualquier query la espera.
 let _schemaReady = false
 let _schemaPromise = null
+let _lastSchemaErrorAt = 0
 
 async function ensureSchema() {
   if (_schemaReady) return true
   if (_schemaPromise) return _schemaPromise
   _schemaPromise = _doEnsureSchema().catch(e => {
-    console.error('[db] ensureSchema falló:', e.message)
+    // Rate limit del log: si un error permanente ocurre en cada query,
+    // no queremos inundar el log. Un mensaje cada 60s.
+    const now = Date.now()
+    if (now - _lastSchemaErrorAt > 60000) {
+      _lastSchemaErrorAt = now
+      console.error('[db] ensureSchema falló:', e.message)
+    }
     _schemaPromise = null // permite reintentar en la próxima query
     throw e
   })
@@ -211,11 +210,40 @@ async function _doEnsureSchema() {
     `CREATE INDEX IF NOT EXISTS idx_player_totals_mvps ON player_totals(mvps DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_player_totals_wins ON player_totals(wins DESC)`,
   ]
+
+  const permissionWarnings = []
   for (const sql of ddl) {
-    await pool.query(sql)
+    try {
+      await pool.query(sql)
+    } catch (e) {
+      // 42501 = insufficient_privilege. Típicamente: la tabla ya existe con
+      // otro owner y no podemos crear índices encima. NO es fatal — la tabla
+      // está, sólo nos falta el índice. Seguimos con el resto del DDL para no
+      // dejar el schema a medias ni bloquear las queries.
+      //
+      // Cualquier otro error (sintaxis, FK, etc.) sí es fatal y aborta.
+      const isPerm = e.code === '42501' || /must be owner|permission denied/i.test(e.message || '')
+      if (isPerm) {
+        permissionWarnings.push(sql.replace(/\s+/g, ' ').trim().slice(0, 140))
+        continue
+      }
+      throw e
+    }
   }
+
+  if (permissionWarnings.length) {
+    console.warn(`[db] schema verificado con ${permissionWarnings.length} DDL omitidas por permisos:`)
+    for (const w of permissionWarnings) console.warn(`       · ${w}`)
+    console.warn(`[db] si querés crear esos índices, corré como owner:`)
+    console.warn(`       ALTER TABLE matches OWNER TO ${PGUSER};`)
+    console.warn(`       ALTER TABLE match_players OWNER TO ${PGUSER};`)
+    console.warn(`       ALTER TABLE goals OWNER TO ${PGUSER};`)
+    console.warn(`       ALTER TABLE player_totals OWNER TO ${PGUSER};`)
+  } else {
+    console.log('[db] schema verificado')
+  }
+
   _schemaReady = true
-  console.log('[db] schema verificado')
   return true
 }
 
@@ -232,8 +260,6 @@ async function query(sql, params) {
     const res = await pool.query(sql, params)
     const ms = Date.now() - start
     if (ms > SLOW_MS) {
-      // Colapsar whitespace y cortar en 200 chars — 80 era muy poco para
-      // queries con JOINs, quedaba truncada antes de la parte interesante.
       const compact = sql.replace(/\s+/g, ' ').trim().slice(0, 200)
       console.warn(`[db] query lenta (${ms}ms):`, compact)
     }
@@ -246,20 +272,14 @@ async function query(sql, params) {
 }
 
 // ── Test connection (con reintentos) ─────────────────────────────────────
-// Antes: si Postgres no estaba up en el momento exacto del arranque, stats
-// quedaba deshabilitado para siempre hasta el próximo restart. Ahora
-// reintentamos con backoff antes de rendirnos.
 async function testConnection({ intentos = 5, esperaBaseMs = 1000 } = {}) {
   let lastErr = null
   for (let i = 1; i <= intentos; i++) {
     try {
-      // Reintento evita el ensureSchema de query() porque si falla en el
-      // startup solo queremos saber si el ping básico funciona.
       const r = await pool.query('SELECT NOW() AS now, version() AS version')
       const row = r.rows[0]
       const versionShort = String(row.version || '').split(' ').slice(0, 2).join(' ')
       console.log(`[db] conectado a postgres (${versionShort}) @ ${row.now}`)
-      // Ahora que sabemos que la conexión funciona, creamos las tablas.
       try { await ensureSchema() } catch (e) { console.warn('[db] no se pudo crear schema:', e.message) }
       return true
     } catch (e) {
@@ -278,17 +298,13 @@ async function testConnection({ intentos = 5, esperaBaseMs = 1000 } = {}) {
     'ECONNREFUSED': 'postgres no está corriendo en ese host:port',
     'ENOTFOUND': 'hostname no resuelve (revisá PGHOST)',
     'ETIMEDOUT': 'timeout de conexión (¿firewall?)',
+    '42501': 'permisos insuficientes (¿owner de las tablas?)',
   }
   console.error(`[db] no se pudo conectar tras ${intentos} intentos (code=${code}):`, hints[code] || lastErr?.message)
   return false
 }
 
 // ── Transacciones ────────────────────────────────────────────────────────
-// Guard anti-anidamiento con AsyncLocalStorage. Sin esto, si alguien llamaba
-// a withTransaction() desde dentro del callback de otro withTransaction, el
-// segundo connect() sacaba OTRO cliente del pool (distinto del que tiene el
-// BEGIN), y el COMMIT del inner iba a una conexión sin transacción abierta.
-// Postgres lo acepta silenciosamente en algunos casos → corrupción de estado.
 const txContext = new AsyncLocalStorage()
 
 async function withTransaction(fn) {
