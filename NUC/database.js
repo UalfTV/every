@@ -3,7 +3,8 @@
  *
  * Estructura:
  *   · Dos pools independientes:
- *       - poolSala   → datos específicos de esta sala (players, records, backups, clanes, admins_auto).
+ *       - poolSala   → datos específicos de esta sala (players, records, backups,
+ *                      clanes, admins_auto).
  *       - poolGlobal → datos compartidos entre todas las salas (player_globals,
  *                      nombres_reservados, players_bans, bot_state).
  *   · Schema init idempotente (ensureSchema). Se llama una vez al arranque.
@@ -138,6 +139,17 @@ async function safeQuery(client, sql, params = [], ctx = "query") {
 
 // ============================================================
 // SCHEMA INIT
+//
+// IMPORTANTE — cada tabla va en el pool que le corresponde por diseño:
+//   · poolSala   → players, records, clanes, backups, admins_auto
+//   · poolGlobal → player_globals, nombres_reservados, players_bans, bot_state
+//
+// BUG CORREGIDO: `admins_auto` estaba creada dentro del bloque
+// `withGlobalClient`, pero TODAS sus operaciones (loadDatabase, agregarAdminAuto,
+// quitarAdminAuto, fetchAdminsAuto) usan `withClient` (pool de sala). Como
+// PGDATABASE y PGDATABASE_GLOBAL apuntan a bases distintas, la tabla se creaba
+// en un lado y se leía en el otro → error 42P01 "relation admins_auto does not
+// exist" al arrancar. Ahora se crea en el pool correcto.
 // ============================================================
 async function ensureSchema() {
     if (schemaListo) return;
@@ -175,6 +187,16 @@ async function ensureSchema() {
             created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );`);
         await c.query(`CREATE INDEX IF NOT EXISTS idx_backups_room_date ON backups(room_id, created_at DESC);`);
+
+        // admins_auto — ANTES estaba por error en el pool global. Acá es donde
+        // corresponde: es local a cada sala.
+        await c.query(`CREATE TABLE IF NOT EXISTS admins_auto (
+            auth         TEXT PRIMARY KEY,
+            agregado_por TEXT,
+            room_id      TEXT,
+            created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );`);
+        await c.query(`CREATE INDEX IF NOT EXISTS idx_admins_auto_room ON admins_auto(room_id);`);
     });
 
     // --- Global (poolGlobal) ---
@@ -216,13 +238,6 @@ async function ensureSchema() {
         );`);
         await c.query(`CREATE INDEX IF NOT EXISTS idx_bans_activos ON players_bans(ban_hasta) WHERE ban_hasta > 0;`);
         await c.query(`CREATE INDEX IF NOT EXISTS idx_bans_blacklist ON players_bans(blacklisted) WHERE blacklisted = TRUE;`);
-
-        await c.query(`CREATE TABLE IF NOT EXISTS admins_auto (
-            auth        TEXT PRIMARY KEY,
-            agregado_por TEXT,
-            room_id     TEXT,
-            created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );`);
 
         await c.query(`CREATE TABLE IF NOT EXISTS bot_state (
             key         TEXT PRIMARY KEY,
