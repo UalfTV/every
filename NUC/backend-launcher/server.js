@@ -1,32 +1,18 @@
 // BahiaClient — servidor de presencia, amigos, clanes, voz, beta keys, admin, stats, party
 // Node puro + pg para stats.
 //
-// v5 — Pasada de calidad:
-//   · /admin requiere BETA_ADMIN_KEY (antes servía el HTML a cualquiera)
-//   · bind a 127.0.0.1 por defecto (BIND_HOST override)
-//   · Comparación de secretos con timingSafeEqual
-//   · /admin/user/block y /delete limpian party huérfana
-//   · getPresenceForPlayer O(1) via índice inverso
-//   · flushAndExit async: espera cierre del pool de Postgres (con techo)
-//   · readBody rechaza con 413 explícito (BodyTooLargeError)
-//   · new URL con fallback a "localhost" si falta Host header
-//   · fetch() con fallback a http.get para Node 16/17
-//   · RATE_SSE_CONNECTIONS → MAX_SSE_CONNECTIONS_PER_PLAYER (es cap, no rate)
+// v6 — Pasada de calidad (esta):
+//   · /match/start idempotente con ON CONFLICT + índice único parcial
+//     (uq_matches_open_per_room, creado por db.js). Antes cerraba el match
+//     previo sin finalizar sus stats → partidos fantasma con score 0-0.
+//   · /match/start ahora en transacción — si falla un INSERT de jugador, se
+//     hace ROLLBACK y no queda match huérfano.
+//   · /match/end limpia activeMatches por matchId además de por roomId.
+//   · durationMs clampeado por si started_at viniera null.
+//   · /party/kick ya no dispara party_left + party_kicked duplicados.
 //
-// v4 — Fixes post-publish:
-//   · Privacy: friends_of_friends ahora se aplica (antes se ignoraba)
-//   · Anti-impersonación en /heartbeat (playerId debe pertenecer al clientId)
-//   · Perfiles/avatares dual-key (pid:playerId estable + nick legacy)
-//   · /match/end en transacción (evita stats parciales si falla)
-//   · /match/start evita duplicados en la misma sala
-//   · SSE se cierra al bloquear/borrar usuario
-//   · Rate limit heartbeat relajado para NAT compartido
-//   · Cache de admin.html con revalidación por mtime
-//   · server.on('error') handler
-//   · db.shutdown() en flushAndExit
-//   · Validación estricta de /voice/signal
-//   · Nuevo endpoint /player/update-nick
-//   · discordId persistido en players
+// v5 — Pasada previa.
+// v4 — Fixes post-publish.
 //
 // LIMITACIÓN BETA: auth con API key compartida.
 
@@ -49,9 +35,6 @@ console.warn = (...a) => _origWarn(`[${_ts()}]`, ...a)
 console.error = (...a) => _origError(`[${_ts()}]`, ...a)
 
 const PORT = parseInt(process.env.PORT || '8787', 10)
-// Por defecto bindeamos solo a localhost. Si necesitás exponer el server a
-// otra interfaz (ej. otro contenedor en la misma red Docker), seteá
-// BIND_HOST=0.0.0.0 o la IP correspondiente en el .env.
 const BIND_HOST = process.env.BIND_HOST || '127.0.0.1'
 const API_KEY = process.env.API_KEY || ''
 const BETA_ADMIN_KEY = process.env.BETA_ADMIN_KEY || ''
@@ -76,7 +59,6 @@ const SWEEP_MS = 15_000
 const VOICE_TTL_MS = 15_000
 const MAX_NICKS_PER_QUERY = 50
 
-// Heartbeat: clientes mandan cada 5s. Con NAT compartido necesitamos margen.
 const RATE_HEARTBEAT_MAX = 30
 const RATE_HEARTBEAT_WINDOW_MS = 5000
 const RATE_MAX_NICKS_PER_IP = 60
@@ -106,9 +88,6 @@ const RATE_PLAYER_SEARCHES = 30
 const RATE_PLAYER_SEARCHES_WINDOW_MS = 60_000
 const RATE_PRIVACY_UPDATES = 5
 const RATE_PRIVACY_UPDATES_WINDOW_MS = 60_000
-// No es un rate limit sino un cap duro de conexiones concurrentes por player
-// (múltiples tabs, reconexiones zombie). Al llegar al cap, se cierra la más
-// vieja para hacerle lugar a la nueva.
 const MAX_SSE_CONNECTIONS_PER_PLAYER = 5
 
 const RATE_PARTY_CREATES = 3
@@ -153,8 +132,6 @@ const NICKNAME_RE = /^[\p{L}\p{N}\s._\-+()\[\]#@!?]{1,25}$/u
 const GEO_CACHE_TTL = 24 * 60 * 60 * 1000
 const GEO_RATE_MS = 1500
 const GEO_FETCH_TIMEOUT_MS = 5000
-// fetch() global es de Node 18+. Para Node 16/17 tiramos de http.get con
-// AbortSignal. Detectamos una vez al arranque.
 const HAS_GLOBAL_FETCH = typeof fetch === 'function'
 
 const NOTIF_TYPES_PERSISTENT = new Set([
@@ -179,9 +156,6 @@ if (!BETA_ADMIN_KEY) console.warn('[bc-presence] OJO: sin BETA_ADMIN_KEY.')
 if (TRUST_PROXY) console.log('[bc-presence] TRUST_PROXY=1.')
 
 const presence = new Map()
-// Índice inverso playerIdLower → nickLower del presence activo. Se mantiene
-// sincronizado desde /heartbeat, /leave y cleanup(). Evita iterar toda la
-// presencia cada vez que alguien pregunta por un jugador.
 const presenceByPlayerId = new Map()
 const friendships = new Map()
 const notificationsPersistent = new Map()
@@ -212,8 +186,6 @@ function now() { return Date.now() }
 function nickL(n) { return String(n || '').toLowerCase().trim() }
 function playerIdL(id) { return String(id || '').toLowerCase().trim() }
 
-// Clave dual-key para perfiles/avatares: si hay playerId usamos "pid:<id>",
-// si no caemos al nick legacy.
 function profileKeyFor({ playerId, nick }){
   if(playerId){
     const p = players.get(playerIdL(playerId))
@@ -257,9 +229,6 @@ function _unindexPresence(nickLower){
 // AUTH HELPERS
 // ============================================================
 
-// Comparación timing-safe: dos secretos del mismo largo se comparan en tiempo
-// constante. Si los largos difieren, return false rápido (esa info ya es
-// pública vía Content-Length).
 function secretoValido(recibido, esperado){
   if(typeof recibido !== 'string' || typeof esperado !== 'string') return false
   if(!recibido.length || !esperado.length) return false
@@ -430,7 +399,6 @@ function loadFriendsFromDisk(){
     console.log(`[bc-presence] migración: ${migrated.size} jugadores, ${resolved} aristas resueltas, ${dropped} dropeadas`)
     if(droppedList.length){ console.warn(`[bc-presence] entradas dropeadas (primeras 20):`, droppedList.slice(0, 20)) }
     friendsDirtyRef.v = true
-    // Defer para garantizar que las declaraciones de abajo ya existan.
     setImmediate(() => scheduleSaveFriendships())
     return
   }
@@ -605,7 +573,6 @@ function enforceAvatarLimits(){
 async function flushAndExit(signal){
   console.log(`[bc-presence] ${signal}, guardando...`)
 
-  // 1) Esperar a que el pool de Postgres cierre (con timeout de seguridad).
   try {
     const shutdownPromise = (db && typeof db.shutdown === 'function')
       ? db.shutdown()
@@ -616,10 +583,8 @@ async function flushAndExit(signal){
     ])
   } catch(_) {}
 
-  // 2) Cancelar timers debounced (evita que un save async pise el save sync).
   for(const t of [avatarsTimer, profilesTimer, betaKeysTimer, usersTimer, playersTimer, clansTimer, friendsTimer, notificationsTimer, partiesTimer]){ if(t.t){ clearTimeout(t.t); t.t = null } }
 
-  // 3) Saves sincrónicos finales.
   try { saveJsonFile(AVATARS_PATH, objFromMap(userAvatars, e => ({ dataUrl: e.dataUrl, updatedAt: e.updatedAt }))) } catch(_){}
   try { saveJsonFile(PROFILES_PATH, objFromMap(userProfiles, e => ({ avatarColor: e.avatarColor, banner: e.banner, bio: e.bio, updatedAt: e.updatedAt }))) } catch(_){}
   try { saveJsonFile(BETA_KEYS_PATH, objFromMap(betaKeys, e => ({ createdAt: e.createdAt, usedAt: e.usedAt, usedBy: e.usedBy, nickname: e.nickname, notes: e.notes }))) } catch(_){}
@@ -683,8 +648,6 @@ function queueGeoLookup(ip, callback){
   processGeoQueue()
 }
 
-// Wrapper JSON con fallback: fetch() global si está, si no http.get con
-// AbortSignal. Necesario para Node 16/17 (fetch recién desde 18).
 function _getJson(url, signal){
   if(HAS_GLOBAL_FETCH){ return fetch(url, { method: 'GET', signal }).then(async r => r.ok ? r.json() : null).catch(() => null) }
   return new Promise((resolve) => {
@@ -745,7 +708,6 @@ function getPresenceForPlayer(idLower){
     if(v && (now() - v.updatedAt) < TTL_MS) return v
     presenceByPlayerId.delete(idLower)
   }
-  // Fallback: cubre entries que todavía no tienen índice (arranque, migración).
   for(const [nkFallback, v] of presence){
     if(v.playerId && playerIdL(v.playerId) === idLower && (now() - v.updatedAt) < TTL_MS){
       presenceByPlayerId.set(idLower, nkFallback)
@@ -823,11 +785,13 @@ function disbandParty(partyId, reason = 'disbanded'){
   scheduleSaveParties()
 }
 
+// FIX S5: removeMemberFromParty ya no emite 'party_left'. Los callers deciden
+// si quieren emitirlo (left) o mandar otro evento (kicked). Antes, /party/kick
+// emitía 'party_left' Y 'party_kicked' al mismo target.
 function removeMemberFromParty(party, idLower, reason = 'left'){
   if(!party.members.has(idLower)) return party
   party.members.delete(idLower)
   partyByPlayer.delete(idLower)
-  broadcastPartyTo(idLower, 'party_left', { partyId: party.partyId, reason })
 
   if(party.members.size === 0){
     parties.delete(party.partyId)
@@ -1286,8 +1250,6 @@ function makeRecoveryCode(){ return `BC-REC-${makeKeyPart()}-${makeKeyPart()}-${
 const server = http.createServer(async (req, res) => {
   try { await handleRequest(req, res) }
   catch(e){
-    // BodyTooLargeError ya fue respondido por el handler con 413, o llega acá
-    // si el handler no lo atrapó. En ambos casos, no logueamos como error 500.
     if(e && e.code === 'BODY_TOO_LARGE'){ try { sendJson(res, 413, { error: 'body_too_large' }) } catch(_){}; return }
     console.error('[bc-presence] error:', e && e.stack || e)
     try { sendJson(res, 500, { error: 'internal_error' }) } catch(_){}
@@ -1295,9 +1257,6 @@ const server = http.createServer(async (req, res) => {
 })
 
 async function handleRequest(req, res){
-  // Fallback a "localhost" si el cliente no manda Host (HTTP/1.0, probes,
-  // algunos health checks). Sin esto, new URL() throwea y el request legítimo
-  // se cae con un 500 en vez de procesarse.
   const hostHeader = req.headers.host || 'localhost'
   const url = new URL(req.url, `http://${hostHeader}`)
   const ip = getClientIp(req)
@@ -1429,7 +1388,6 @@ async function handleRequest(req, res){
     const u = users.get(clientId); if(!u){ sendJson(res, 404, { error: 'user_not_found' }); return }
     u.blocked = true; u.blockReason = reason || 'Bloqueado por el administrador'
     users.set(clientId, u); scheduleSaveUsers()
-    // Cerrar SSE activos + desvincular de cualquier party activa.
     if(u.playerId){
       const pidLower = playerIdL(u.playerId)
       const clients = sseClients.get(pidLower)
@@ -1514,10 +1472,6 @@ async function handleRequest(req, res){
     sendJson(res, 200, { players: list, total: list.length }); return
   }
   if(url.pathname === '/admin' && req.method === 'GET'){
-    // El panel se sirve solo si el admin key viene en el querystring o en el
-    // header. El front sigue pidiendo la key igual para llamar a /admin/*,
-    // pero al menos no exponemos la estructura del panel a cualquiera que
-    // pegue al puerto.
     const adminKey = safeStr(url.searchParams.get('k') || req.headers['x-admin-key'] || '', 128)
     if(!BETA_ADMIN_KEY || !secretoValido(adminKey, BETA_ADMIN_KEY)){
       sendHtml(res, 401, '<h2>401 — Falta o es inválida la admin key. Pasala como ?k=TU_KEY o header x-admin-key.</h2>')
@@ -1551,7 +1505,6 @@ async function handleRequest(req, res){
     const haxballPlayerId = typeof payload.haxballPlayerId === 'number' ? payload.haxballPlayerId : null
     if(isBlocked(clientId)){ const u = users.get(clientId); sendJson(res, 403, { ok: false, error: 'blocked', message: u && u.blockReason ? u.blockReason : 'Acceso bloqueado.' }); return }
 
-    // Anti-impersonación: playerId debe pertenecer al clientId.
     if(playerIdRaw){
       const owner = users.get(clientId)
       const expected = owner && owner.playerId ? playerIdL(owner.playerId) : null
@@ -2185,7 +2138,6 @@ async function handleRequest(req, res){
     const u = users.get(clientId); if(u){ u.nickname = nv.nickname; users.set(clientId, u); scheduleSaveUsers() }
     sendJson(res, 200, { ok: true, nickname: nv.nickname }); return
   }
-  // Alias por playerId (usado por el cliente actual)
   if(url.pathname === '/player/update-nick' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
     let body; try { body = parseJsonBody(await readBody(req)) } catch(e){ sendJson(res, e.status || 400, { error: 'bad_json' }); return }
@@ -2334,6 +2286,9 @@ async function handleRequest(req, res){
     const party = getPartyForPlayer(me.idLower)
     if(!party){ sendJson(res, 200, { ok: true, party: null }); return }
     const remaining = removeMemberFromParty(party, me.idLower, 'left')
+    // FIX S5: emitir party_left explícitamente al que se va (removeMemberFromParty
+    // ya no lo hace).
+    broadcastPartyTo(me.idLower, 'party_left', { partyId: party.partyId, reason: 'left' })
     const meView = remaining ? buildPartyView(remaining, me.idLower) : null
     sendJson(res, 200, { ok: true, party: meView })
     return
@@ -2350,6 +2305,8 @@ async function handleRequest(req, res){
     if(target.idLower === me.idLower){ sendJson(res, 400, { error: 'cannot_kick_self' }); return }
     if(!party.members.has(target.idLower)){ sendJson(res, 404, { error: 'not_in_party' }); return }
     const remaining = removeMemberFromParty(party, target.idLower, 'kicked')
+    // FIX S5: sólo emitimos party_kicked (no party_left). El evento semántico
+    // correcto para este flujo es el kick.
     broadcastPartyTo(target.idLower, 'party_kicked', { partyId: party.partyId, byPlayerId: me.id, byNick: me.nickname })
     sendJson(res, 200, { ok: true, party: remaining ? buildPartyView(remaining, me.idLower) : null })
     return
@@ -2388,6 +2345,8 @@ async function handleRequest(req, res){
       sendJson(res, 503, { error: 'stats_disabled' }); return
     }
   }
+
+  // FIX S1 + S2: /match/start idempotente y transaccional.
   if(db && url.pathname === '/match/start' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
     if(!checkRate(ip, 'matchCalls', RATE_MATCH_CALLS, RATE_MATCH_WINDOW_MS)){ sendJson(res, 429, { error: 'rate limited' }); return }
@@ -2395,25 +2354,56 @@ async function handleRequest(req, res){
     const roomId = safeStr(body.roomId, 128), roomName = safeStr(body.roomName, 80), stadium = safeStr(body.stadium, 80)
     const playersList = Array.isArray(body.players) ? body.players.slice(0, 30) : []
     if(!roomId){ sendJson(res, 400, { error: 'missing_roomId' }); return }
-    const prev = activeMatches.get(roomId)
-    if(prev){
-      console.warn(`[stats] /match/start duplicado en room ${roomId}; cerrando match previo #${prev.matchId}`)
-      try {
-        await db.query(`UPDATE matches SET ended_at = $1, duration_ms = $2 WHERE id = $3 AND ended_at IS NULL`, [Date.now(), Math.max(0, Date.now() - (prev.createdAt || Date.now())), prev.matchId])
-      } catch(_) {}
-      activeMatches.delete(roomId)
-    }
+
+    const _tx = (typeof db.withTransaction === 'function')
+      ? db.withTransaction
+      : (async (fn) => fn(db.pool))
+
     try {
-      const ins = await db.query(`INSERT INTO matches (room_id, room_name, stadium, started_at) VALUES ($1, $2, $3, $4) RETURNING id`, [roomId, roomName || null, stadium || null, Date.now()])
-      const matchId = ins.rows[0].id
-      for(const p of playersList){
-        const pid = safeStr(p.playerId, 32); if(!pid) continue
-        await db.query(`INSERT INTO match_players (match_id, player_id, haxball_id, nickname, team_id) VALUES ($1, $2, $3, $4, $5)`, [matchId, pid, typeof p.haxballId === 'number' ? p.haxballId : null, safeStr(p.nickname, 25) || null, typeof p.teamId === 'number' ? p.teamId : 0])
+      const result = await _tx(async (tx) => {
+        const q = (sql, params) => tx.query(sql, params)
+        const ins = await q(
+          `INSERT INTO matches (room_id, room_name, stadium, started_at)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (room_id) WHERE ended_at IS NULL DO NOTHING
+           RETURNING id`,
+          [roomId, roomName || null, stadium || null, Date.now()]
+        )
+        if(ins.rows.length){
+          const matchId = ins.rows[0].id
+          for(const p of playersList){
+            const pid = safeStr(p.playerId, 32); if(!pid) continue
+            await q(
+              `INSERT INTO match_players (match_id, player_id, haxball_id, nickname, team_id)
+               VALUES ($1, $2, $3, $4, $5)`,
+              [matchId, pid, typeof p.haxballId === 'number' ? p.haxballId : null, safeStr(p.nickname, 25) || null, typeof p.teamId === 'number' ? p.teamId : 0]
+            )
+          }
+          return { matchId, duplicate: false }
+        }
+        const existing = await q(
+          `SELECT id FROM matches WHERE room_id = $1 AND ended_at IS NULL ORDER BY id DESC LIMIT 1`,
+          [roomId]
+        )
+        if(!existing.rows.length){ const err = new Error('conflict_retry'); err.status = 409; throw err }
+        return { matchId: existing.rows[0].id, duplicate: true }
+      })
+
+      activeMatches.set(roomId, {
+        matchId: result.matchId,
+        players: playersList.map(p => ({ playerId: safeStr(p.playerId, 32), haxballId: p.haxballId, teamId: p.teamId, nickname: safeStr(p.nickname, 25) })),
+        createdAt: now(),
+      })
+      if(result.duplicate){
+        console.warn(`[stats] /match/start duplicado en room ${roomId}; devolviendo match #${result.matchId}`)
+      } else {
+        console.log(`[stats] match #${result.matchId} iniciado`)
       }
-      activeMatches.set(roomId, { matchId, players: playersList.map(p => ({ playerId: safeStr(p.playerId, 32), haxballId: p.haxballId, teamId: p.teamId, nickname: safeStr(p.nickname, 25) })), createdAt: now() })
-      console.log(`[stats] match #${matchId} iniciado`)
-      sendJson(res, 200, { ok: true, matchId })
-    } catch(e){ console.error('[stats] /match/start:', e.message); sendJson(res, 500, { error: 'db_error', message: e.message }) }
+      sendJson(res, 200, { ok: true, matchId: result.matchId, duplicate: !!result.duplicate })
+    } catch(e){
+      if(e && e.status === 409){ sendJson(res, 409, { error: 'conflict_retry' }); return }
+      console.error('[stats] /match/start:', e.message); sendJson(res, 500, { error: 'db_error', message: e.message })
+    }
     return
   }
   if(db && url.pathname === '/match/goal' && req.method === 'POST'){
@@ -2431,6 +2421,8 @@ async function handleRequest(req, res){
     catch(e){ console.error('[stats] /match/goal:', e.message); sendJson(res, 500, { error: 'db_error', message: e.message }) }
     return
   }
+
+  // FIX S3 + S4: /match/end limpia por matchId y clampea durationMs.
   if(db && url.pathname === '/match/end' && req.method === 'POST'){
     if(!checkAuth(req)){ sendJson(res, 401, { error: 'unauthorized' }); return }
     if(!checkRate(ip, 'matchCalls', RATE_MATCH_CALLS, RATE_MATCH_WINDOW_MS)){ sendJson(res, 429, { error: 'rate limited' }); return }
@@ -2438,7 +2430,7 @@ async function handleRequest(req, res){
     const matchId = parseInt(body.matchId, 10), scoreRed = parseInt(body.scoreRed, 10) || 0, scoreBlue = parseInt(body.scoreBlue, 10) || 0
     const roomIdRaw = safeStr(body.roomId, 128)
     if(!matchId){ sendJson(res, 400, { error: 'missing_matchId' }); return }
-    const _tx = (db && typeof db.withTransaction === 'function')
+    const _tx = (typeof db.withTransaction === 'function')
       ? db.withTransaction
       : (async (fn) => fn(db.pool))
     try {
@@ -2446,7 +2438,10 @@ async function handleRequest(req, res){
         const q = (sql, params) => tx.query(sql, params)
         const mRes = await q('SELECT started_at FROM matches WHERE id = $1 FOR UPDATE', [matchId])
         if(!mRes.rows.length) return { notFound: true }
-        const startedAt = Number(mRes.rows[0].started_at), endedAt = Date.now(), durationMs = Math.max(0, endedAt - startedAt)
+        const startedAtNum = Number(mRes.rows[0].started_at)
+        const startedAt = Number.isFinite(startedAtNum) && startedAtNum > 0 ? startedAtNum : Date.now()
+        const endedAt = Date.now()
+        const durationMs = Math.max(0, Math.min(endedAt - startedAt, 6 * 60 * 60 * 1000))
         await q(`UPDATE matches SET score_red = $1, score_blue = $2, ended_at = $3, duration_ms = $4 WHERE id = $5`, [scoreRed, scoreBlue, endedAt, durationMs, matchId])
         const goalsRes = await q('SELECT scorer_id, assister_id, own_goal FROM goals WHERE match_id = $1', [matchId])
         const goalsByPlayer = new Map(), assistsByPlayer = new Map(), ownGoalsByPlayer = new Map()
@@ -2493,6 +2488,7 @@ async function handleRequest(req, res){
 
       if(result.notFound){ sendJson(res, 404, { error: 'match_not_found' }); return }
       if(roomIdRaw) activeMatches.delete(roomIdRaw)
+      for(const [rid, m] of activeMatches){ if(m.matchId === matchId) activeMatches.delete(rid) }
       console.log(`[stats] match #${matchId} terminado: ${scoreRed}-${scoreBlue}`)
       sendJson(res, 200, { ok: true, matchId, duration: result.durationMs, mvp: result.mvpPlayerId })
     } catch(e){ console.error('[stats] /match/end:', e.message); sendJson(res, 500, { error: 'db_error', message: e.message }) }
