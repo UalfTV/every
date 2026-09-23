@@ -10,10 +10,6 @@ const ROOM_CONFIG_FILE = process.env.ROOM_CONFIG_FILE || "./HA.config.js";
 const ROOM_CONFIG = require(ROOM_CONFIG_FILE);
 if (ROOM_CONFIG.PG_OVERRIDES && ROOM_CONFIG.PG_OVERRIDES.database) process.env.PGDATABASE = ROOM_CONFIG.PG_OVERRIDES.database;
 
-// ============================================
-// SISTEMAS CENTRALIZADOS - EMOJIS Y COLORES
-// ============================================
-
 const EMOJIS = {
     success: "\u2705", error: "\u274c", warning: "\u26a0\ufe0f", info: "\u2139\ufe0f",
     soccer: "\u26bd", goal: "\u26bd", trophy: "\ud83c\udfc6",
@@ -47,7 +43,6 @@ const {
     closePool, getPool, getGlobalPool, setBotState, getBotState, marcarProcesoApagado,
 } = require("./db/database.js");
 
-
 const Logger = {
     info: (msg) => logMsg('info.log', `[${ROOM_ID}] ${msg}`),
     warn: (msg) => logMsg('warn.log', `[${ROOM_ID}] ${EMOJIS.warning} ${msg}`),
@@ -78,24 +73,12 @@ const CONFIG = {
     BALL_MAX_SPEED: 45, VELOCIDAD_PX_POR_METRO: 75, FESTEJO_VEL_MAX: 11,
     POWERSHOT_TIMEOUT_ABSOLUTO_MS: 6000,
 
-    // ── Curva (perpendicular, por ROTACIÓN de velocidad) ──
-    // Antes se sumaba una fuerza perpendicular cada tick. El damping del
-    // motor (~0.96) disipaba esa fuerza antes de que se acumule — por eso
-    // "no se notaba un carajo". Ahora se ROTA el vector velocidad por
-    // CURVA_ANGULO_POR_TICK radianes por tick: la dirección cambia de forma
-    // acumulativa y el arco total es la suma de todos los ticks. Es lo que
-    // hace el efecto Magnus real. Angulo total ≈ suma de decay * angulo.
     CURVA_TICKS: 150,
-    // Ángulo por tick y decay para que el arco TOTAL sea notorio.
-    // Con 0.022 rad/tick * sum(decay) da ~1.7 rad ≈ 95° de comba total,
-    // concentrada en el primer segundo (decay pow > 1) que es cuando el
-    // tiro va rápido y el desplazamiento lateral por tick se ve mejor.
     CURVA_ANGULO_POR_TICK: 0.022,
     CURVA_DECAY_POW: 1.2,
     CURVA_GRACE_TICKS: 2,
     CURVA_COLOR_A: "00FFC8", CURVA_COLOR_B: "FFFFFF",
 
-    // ── Rainbow jersey ──
     RAINBOW_GOL_VELOCIDAD: 4,
     RAINBOW_GOL_INTERVALO_TICKS: 2,
 
@@ -126,17 +109,8 @@ const CONFIG = {
 
     MIN_PLAYERS_VOTE: 4, PORCENTAJE_VOTOS: 50, COOLDOWN_VOTE: 60000,
     AFK_DETECT_MS: 90000, AFK_KICK_MS: 20000, AFK_WARN_MS: 10000,
-
-    // ── Cooldowns AFK (anti-abuso) ──
-    // AFK_MIN_DURACION_MS: mínimo que tenés que estar AFK antes de poder
-    // volver por tu cuenta (evita el "!afk → sale → !afk → entra" instantáneo
-    // que se usaba como teletransporte al arco).
     AFK_MIN_DURACION_MS: 10000,
-    // AFK_REINGRESO_COOLDOWN_MS: después de volver de AFK (por comando o
-    // por detección automática), cuánto tiempo no podés usar !jugar.
     AFK_REINGRESO_COOLDOWN_MS: 20000,
-    // AFK_TOGGLE_COOLDOWN_MS: entre dos usos de !afk durante partido, para
-    // que no se pueda ir-y-volver en el mismo segundo.
     AFK_TOGGLE_COOLDOWN_MS: 10000,
 
     JUGAR_COOLDOWN_MS: 60000,
@@ -183,8 +157,6 @@ const CONFIG = {
     CMD_COOLDOWN_MS: 300, CLAN_INVITACION_TTL_MS: 300000,
     RULETA_VERDE_PAYOUT: 33, RULETA_ROJO_NEGRO_PAYOUT: 2,
 };
-
-
 
 const RACHA_BONUS = {
     xp: [0, 0, 5, 10, 15, 25, 35, 50, 75, 100, 150],
@@ -295,13 +267,13 @@ const STATE = {
     powershotKickLockId: null, powershotKickLockTs: 0,
     curvaActivado: false, curvaEnCurso: null,
     festejosVipActivos: {}, salidasVoluntarias: new Set(), powershotBallDefaults: null,
-    rainbowEquipoActivo: null,          // { team, hueTick, startTs, colorOriginal }
+    rainbowEquipoActivo: null,
     jueganTodosActivo: false, maxPlayersPerTeam: 2, automatizadoActivado: CONFIG.AUTOMATED_MODE_DEFAULT,
     configuracionActual: null, bracketFijo: null, limitesCancha: null, cambioMapaPendiente: null,
-    verificacionesPendientes: {}, votaciones: { expulsar: null }, votos: { expulsar: {} }, votacionTokenSeq: 0,
+    verificacionesPendientes: {}, votaciones: { expulsar: null, kick30: null, mute30: null }, votos: { expulsar: {}, kick30: {}, mute30: {} }, votacionTokenSeq: 0,
     afkPlayers: new Set(), playerPositions: {}, playerLastMove: {}, afkDesde: {}, afkAvisado30s: new Set(),
-    afkCooldown: new Map(),       // key -> ts hasta el cual no puede !jugar
-    ultimoToggleAfk: {},          // id -> ts del último !afk (anti-teletransporte)
+    afkCooldown: new Map(),
+    ultimoToggleAfk: {},
     ultimoJugar: {},
     mutesTemporales: [], bansTemporales: [], mensajesRecientes: {},
     apuestas: {}, duelosActivos: [], reportes: [], ultimoLlamadoAdmin: 0, titulosExclusivos: {},
@@ -319,6 +291,7 @@ const STATE = {
     vipBallColorTimeout: null, colorPelotaDefault: null, tipIndex: -1, cooldownsCmd: new Map(),
     ultimoEquipoInicial: 1,
     siguienteIdPermanente: 1,
+    authIntentos: {},
 };
 
 const RETRY_QUEUE = [];
@@ -328,8 +301,6 @@ let ultimoColorPelotaEnviado = null;
 function setColorPelota(color) {
     if (color === ultimoColorPelotaEnviado) return;
     ultimoColorPelotaEnviado = color;
-    // Si es un hex string (gradientes/efectos) va con 0x prefijo.
-    // Si es el valor crudo del engine (ej. -1 = color nativo), se manda tal cual.
     const val = typeof color === "string" ? `0x${color}` : color;
     safeOperation(() => STATE.room.setDiscProperties(0, { color: val }));
 }
@@ -374,9 +345,6 @@ function mantenerPelotaEnCancha(ballPosition) {
     const nx = fueraX ? Math.sign(ballPosition.x) * limX * 0.9 : ballPosition.x;
     const ny = fueraY ? Math.sign(ballPosition.y) * limY * 0.9 : ballPosition.y;
     safeOperation(() => STATE.room.setDiscProperties(0, { x: nx, y: ny, xspeed: fueraX ? -props.xspeed * 0.8 : props.xspeed * 0.95, yspeed: fueraY ? -props.yspeed * 0.8 : props.yspeed * 0.95 }));
-    // Usar finalizarCurva() en vez de null manual: garantiza que el color
-    // se restaure al valor base del mapa incluso si ultimoColorPelotaEnviado
-    // quedó desincronizado por un powershot previo.
     if (STATE.curvaEnCurso) finalizarCurva();
     logMsg('errors.log', `[${ROOM_ID}] Pelota fuera corregida en (${ballPosition.x.toFixed(0)}, ${ballPosition.y.toFixed(0)})`);
 }
@@ -405,16 +373,21 @@ function msgInfo(t, ti = null) { sendAnnouncement(`💡 ${t}`, ti, COLORES.info,
 function msgGame(t, ti = null, c = COLORES.blanco, so = 1) { sendAnnouncement(`⚽ ${t}`, ti, c, "small", so); }
 function footerRanking() { return `📊 Sobre ${Object.keys(STATE.baseDatos).length} jugadores`; }
 
+function safeOperation(op, fb = null) {
+    try { return op(); } catch (e) { logMsg('errors.log', `[${ROOM_ID}] SafeOp: ${e.message}`); return fb; }
+}
+
 function validarMonedas(player, cantidad, mensaje = "No tenés suficientes monedas") {
     const s = STATE.baseDatos[getPlayerKey(player)];
     if (!s || s.monedas < cantidad) {
-        msgError(`${mensaje} · Saldo actual: ${s.monedas}${EMOJIS.coins}`, player.id);
+        msgError(`${mensaje} · Saldo actual: ${s?.monedas ?? 0}${EMOJIS.coins}`, player.id);
         return false;
     }
     return true;
 }
 function validarCantidad(c, min = 0, max = Infinity) { return !isNaN(c) && c >= min && c <= max; }
-    try { return op(); } catch (e) { logMsg('errors.log', `[${ROOM_ID}] SafeOp: ${e.message}`); return fb; }function limpiarCache() {
+
+function limpiarCache() {
     const now = Date.now();
     for (const [k, ts] of STATE.caches.timestamps.entries()) if (now - ts > CONFIG.CACHE_TTL) { STATE.caches.titulos.delete(k); STATE.caches.badges.delete(k); STATE.caches.timestamps.delete(k); }
 }
@@ -436,9 +409,7 @@ function getPlayerKey(p) {
     return key;
 }
 
-// Limpiar cache cada 5 minutos
 setInterval(() => playerKeyCache.clear(), 300000);
-
 
 function esKeyAnonima(k) { return typeof k === "string" && k.startsWith("anon_"); }
 function esOwner(p) {
@@ -459,7 +430,9 @@ function auditLog(actor, accion, target, detalles = "") { logMsg('audit.log', `[
 async function pollGlobalSync() {
     try {
         const { bans, nombres } = await fetchGlobalSyncData();
-        for (const r of nombres) if (!STATE.nombresReservados.has(r.nombre)) STATE.nombresReservados.set(r.nombre, r.owner_key);
+        // FIX E: reconstruir el Map entero desde la fuente de verdad — si la
+        // otra sala liberó una reserva, este poll la debe borrar de acá.
+        STATE.nombresReservados = new Map(nombres.map(r => [r.nombre, r.owner_key]));
         for (const r of bans) {
             const l = STATE.baseDatos[r.key]; if (!l) continue;
             const bh = Number(r.ban_hasta) || 0;
@@ -767,8 +740,9 @@ function embedEstadoSala() {
     let modo = "⛔ Manual";
     if (STATE.automatizadoActivado) modo = STATE.bracketFijo === BRACKET_X4_FIJO ? "⚙️ Auto · X4 fijo" : `⚙️ Auto · ${STATE.maxPlayersPerTeam}v${STATE.maxPlayersPerTeam}`;
     else if (STATE.jueganTodosActivo) modo = "👥 Juegan todos";
+    const link = STATE.roomLink || "";
     return construirEmbed({
-        title: CONFIG.NOMBRE_SALA, description: [`**${est}**`, `[🔗 Click acá para entrar](${STATE.roomLink || CONFIG.ROOM_LINK || ""})`].join("\n"), color: col,
+        title: CONFIG.NOMBRE_SALA, description: [`**${est}**`, link ? `[🔗 Click acá para entrar](${link})` : ""].filter(Boolean).join("\n"), color: col,
         fields: [
             { name: "👥 Jugadores", value: `\`${enSala.length}/${CONFIG.MAX_JUGADORES_SALA}\` ${barraProgreso(enSala.length, CONFIG.MAX_JUGADORES_SALA)}`, inline: false },
             { name: "⏱️ Uptime", value: formatUptime(Date.now() - STATE.inicioSala), inline: true },
@@ -833,7 +807,13 @@ function confirmarVerificacionDiscord(cod, dId = null, dTag = null) {
 }
 function iniciarServidorVerificacion() {
     const server = http.createServer((req, res) => {
-        if (req.headers["x-verificacion-secreto"] !== CONFIG.VERIFICACION_HTTP_SECRETO) { res.writeHead(401); return res.end("no autorizado"); }
+        // FIX #14: /ranking es un endpoint público (querystring + sin
+        // autenticación pensada para bots). El chequeo de secreto se saltea
+        // sólo para GET /ranking; el resto sigue gateado.
+        const esRankingPublico = req.method === "GET" && req.url.startsWith("/ranking");
+        if (!esRankingPublico && req.headers["x-verificacion-secreto"] !== CONFIG.VERIFICACION_HTTP_SECRETO) {
+            res.writeHead(401); return res.end("no autorizado");
+        }
         if (req.method === "POST" && req.url === "/verificar") {
             let body = "";
             req.on("data", c => { body += c; if (body.length > 10000) req.destroy(); });
@@ -883,7 +863,14 @@ function iniciarServidorVerificacion() {
 function ejecutarAccionAdmin(accion, payload) {
     if (!STATE.room) return { ok: false, error: "Sin sala" };
     switch (accion) {
-        case "reiniciar": { const h = STATE.partidoEnCurso; STATE.room.stopGame(); setTimeout(() => { if (STATE.room && !STATE.partidoEnCurso) STATE.room.startGame(); }, 1000); return { ok: true, mensaje: h ? "Reiniciado" : "Reiniciado" }; }
+        case "reiniciar": {
+            // FIX #13: el ternario devolvía "Reiniciado" en ambas ramas y h no
+            // se usaba. Ahora el mensaje diferencia los dos casos.
+            const h = STATE.partidoEnCurso;
+            STATE.room.stopGame();
+            setTimeout(() => { if (STATE.room && !STATE.partidoEnCurso) STATE.room.startGame(); }, 1000);
+            return { ok: true, mensaje: h ? "Partido reiniciado" : "Sala reiniciada" };
+        }
         case "minutos": { if (STATE.partidoEnCurso) return { ok: false, error: "Partido en curso" }; const m = parseInt(payload.valor, 10); if (!Number.isFinite(m) || m < 0) return { ok: false, error: "Inválido" }; STATE.room.setTimeLimit(m); if (STATE.configuracionActual) STATE.configuracionActual.timeLimit = m; return { ok: true, mensaje: `${m} min` }; }
         case "goles": { if (STATE.partidoEnCurso) return { ok: false, error: "Partido en curso" }; const g = parseInt(payload.valor, 10); if (!Number.isFinite(g) || g < 0) return { ok: false, error: "Inválido" }; STATE.room.setScoreLimit(g); if (STATE.configuracionActual) STATE.configuracionActual.scoreLimit = g; return { ok: true, mensaje: `${g === 0 ? "sin límite" : g}` }; }
         case "mensaje": { const t = String(payload.texto || "").trim().slice(0, 200); if (!t) return { ok: false, error: "Vacío" }; sendAnnouncement(`💬 ${String(payload.autor || "Discord").slice(0, 32)} (Discord): ${t}`, null, 0x5865F2, "normal", 0); return { ok: true }; }
@@ -916,13 +903,6 @@ function aplicarTamanoPersistente(p) {
 let enforceCounter = 0;
 function aplicarTamanosPersistentes() { enforceCounter++; if (enforceCounter % 5 !== 0) return; STATE.room.getPlayerList().filter(p => p.team !== 0 && !STATE.animacionGolActiva.has(p.id)).forEach(aplicarTamanoPersistente); }
 
-// ── Powershot + curva perpendicular ──
-// cancelarPowershotCarga: solo cancela la CARGA del powershot (color,
-// trigger, ID, timer). NO toca STATE.curvaEnCurso. Esto es clave: la curva
-// debe sobrevivir aunque el pateador se aleje, aunque el sistema reinicie
-// la carga por error un tick después del kick, o aunque otro jugador la
-// reactive. Si esto llamara a finalizarCurva(), la comba moría a los pocos
-// ms del disparo (síntoma: "la pelota se pone blanca y desaparece").
 function cancelarPowershotCarga() {
     restaurarPelotaPowershot();
     STATE.powershotTrigger = false;
@@ -930,9 +910,6 @@ function cancelarPowershotCarga() {
     STATE.powershotID = 0;
     STATE.powershotChargeStartTime = null;
 }
-// resetPowershotState: reset COMPLETO (powershot + curva). Se usa al
-// terminar un partido, al hacer un gol, al detectar error, o cuando hay
-// que garantizar que no quede ninguna comba activa.
 function resetPowershotState() { cancelarPowershotCarga(); finalizarCurva(); }
 function handlePowerShot(pl, bp, bpr) { try { _handlePowerShotInterno(pl, bp, bpr); } catch (e) { logMsg('errors.log', `[${ROOM_ID}] Error handlePowerShot: ${e.message}`); resetPowershotState(); } }
 function _handlePowerShotInterno(playerList, bpc, bprc) {
@@ -940,9 +917,6 @@ function _handlePowerShotInterno(playerList, bpc, bprc) {
         if (STATE.powershotID !== 0 || STATE.powershotTrigger || STATE.powershotBallDefaults) resetPowershotState();
         return;
     }
-    // Lock post-kick: ignorar por ~6 ticks (~100ms) al pateador que acaba
-    // de disparar, para que no rearranque la carga mientras la comba está
-    // recién iniciada y la pelota todavía está saliendo de su radio.
     if (STATE.powershotKickLockId != null && (Date.now() - (STATE.powershotKickLockTs || 0)) < 100) {
         if (bpc && bprc) {
             const lim = getLimitesCancha();
@@ -951,7 +925,7 @@ function _handlePowerShotInterno(playerList, bpc, bprc) {
                 STATE.powershotKickLockId = null;
                 STATE.powershotKickLockTs = 0;
             } else {
-                return; // todavía pegado → no re-cargar
+                return;
             }
         } else {
             STATE.powershotKickLockId = null;
@@ -1025,34 +999,15 @@ function restaurarPelotaPowershot() {
         safeOperation(() => STATE.room.setDiscProperties(0, {
             invMass: d.invMass, bCoef: d.bCoef, damping: d.damping, color: d.color,
         }));
-        // OJO: d.color es un NÚMERO (getDiscProperties devuelve int).
-        // String(numero) da DECIMAL ("16777215"), no hex ("FFFFFF").
-        // Usar colorPelotaAHex para normalizar siempre a 6 chars hex.
         ultimoColorPelotaEnviado = colorPelotaAHex(d.color);
         return;
     }
     if (!hayEfectoDeColorActivo()) setColorPelota(colorPelotaOriginal());
 }
-
-// ── Curva perpendicular por ROTACIÓN de velocidad ──
-// Antes se sumaba una fuerza perpendicular cada tick. El damping del motor
-// (~0.96) disipaba la velocidad perpendicular antes de que se acumule, así
-// que subir CURVA_FUERZA no servía — la curva "no se notaba un carajo".
-// Ahora se ROTA el vector velocidad directamente: cada tick la dirección
-// cambia CURVA_ANGULO_POR_TICK radianes, y como eso no depende del damping,
-// se acumula de forma predecible. Angulo total para un tiro de 150 ticks
-// con decay pow 0.35 ≈ 1.15 rad ≈ 66°. Es lo mismo que hace un efecto
-// Magnus real, sin pelear contra la fricción.
 function finalizarCurva() {
     const c = STATE.curvaEnCurso;
     if (!c) return;
     STATE.curvaEnCurso = null;
-    // IMPORTANTE: usar SIEMPRE el color default del mapa (valor crudo,
-    // puede ser -1 = color nativo). Si usáramos c.colorOriginal y ese
-    // snapshot se tomó del estado "charged" del powershot, la pelota
-    // quedaría pintada de rojo/rosa para siempre. Y si forzáramos un hex
-    // fallback tipo "FFFFFF", la pelota queda blanca perma en vez de
-    // volver a su color real del mapa.
     setColorPelota(colorPelotaOriginal());
 }
 
@@ -1069,13 +1024,8 @@ function pelotaTocoAlgo(bp, bpr, playerList, kickerId) {
     if (playerList) {
         for (const p of playerList) {
             if (p.team === 0 || !p.position) continue;
-            // Saltar al pateador: sigue pegado a la pelota en los primeros
-            // ticks del disparo y cortaría la curva al instante. Si la
-            // vuelve a tocar, el onPlayerBallKick resetea la comba igual.
             if (kickerId != null && p.id === kickerId) continue;
             const pr = STATE.radioJugadorCache.get(p.id) ?? 15;
-            // Margen de +1 (antes +2) porque el radio del jugador viene de
-            // un cache que a veces queda levemente desactualizado.
             if (pointDistance(p.position, bp) < bRad + pr + 1) return true;
         }
     }
@@ -1086,8 +1036,6 @@ function aplicarComba(bp, bpr, playerList) {
     if (!STATE.curvaEnCurso) return null;
     const c = STATE.curvaEnCurso;
     c.ticksActivos = (c.ticksActivos || 0) + 1;
-    // Chequeo de colisión sólo después del grace period: el pateador sigue
-    // pegado a la pelota 1-2 ticks y no queremos autocancelarla.
     if (c.ticksActivos > CONFIG.CURVA_GRACE_TICKS && pelotaTocoAlgo(bp, bpr, playerList, c.kickerId)) {
         finalizarCurva();
         return null;
@@ -1097,16 +1045,6 @@ function aplicarComba(bp, bpr, playerList) {
     if (!props) { finalizarCurva(); return null; }
     const sp = Math.sqrt(props.xspeed ** 2 + props.yspeed ** 2);
     if (sp <= 0.5) { finalizarCurva(); return null; }
-    // Detección de choque por cambio brusco de dirección o velocidad.
-    // El damping del motor sólo escala el vector (misma dirección), así que
-    // si el ángulo cambia más de ~5.7° en un tick (cos < 0.995), o si la
-    // velocidad ACELERA (curSp > prevSp * 1.05), es porque la pelota chocó
-    // contra algo: pared lateral real, poste, red o jugador. Este check
-    // cubre específicamente las paredes que el check geométrico no ve
-    // (los vertexes del fondo de las redes están más afuera que la pared
-    // lateral real, así que Math.abs(bp.y) > maxY - mY nunca daba true).
-    // Nuestra rotación máxima de comba es 0.022 rad ≈ 1.26°/tick, muy por
-    // debajo del umbral, así que no hay falsos positivos.
     if (c.ultimaVel) {
         const prevSp = Math.hypot(c.ultimaVel.x, c.ultimaVel.y);
         const curSp = Math.hypot(props.xspeed, props.yspeed);
@@ -1124,8 +1062,6 @@ function aplicarComba(bp, bpr, playerList) {
     c.tickColor = (c.tickColor || 0) + 1;
     const fase = (1 - Math.cos((cuantizarTickColor(c.tickColor) / 40) * Math.PI * 2)) / 2;
     const colorHex = interpolarColorHex(CONFIG.CURVA_COLOR_A, CONFIG.CURVA_COLOR_B, fase);
-    // ⚠️ SOLO xspeed/yspeed/color. NUNCA x/y: anclar la posición cada tick
-    // hace que el motor "re-teletransporte" la pelota y se sienta trabada.
     const propsN = { xspeed: nvx, yspeed: nvy, color: `0x${colorHex}` };
     safeOperation(() => STATE.room.setDiscProperties(0, propsN));
     ultimoColorPelotaEnviado = colorHex;
@@ -1158,11 +1094,6 @@ function handlePowerShotKick(player) {
                     dir = cr >= 0 ? 1 : -1;
                 }
             }
-            // colorOriginal ya no se guarda: finalizarCurva() siempre usa
-            // colorPelotaOriginal() (que respeta el color base del mapa y
-            // nunca devuelve -1). Guardar un snapshot acá era fuente de bugs
-            // (si el snapshot se tomaba durante el flash del powershot, la
-            // pelota quedaba pintada de rojo/rosa para siempre).
             STATE.curvaEnCurso = {
                 ticksRestantes: CONFIG.CURVA_TICKS,
                 ticksActivos: 0,
@@ -1175,11 +1106,6 @@ function handlePowerShotKick(player) {
     }
     restaurarPelotaPowershot();
     STATE.powershotTrigger = false; STATE.powershotCounter = 0; STATE.powershotID = 0; STATE.powershotChargeStartTime = null;
-    // Lock: durante los próximos ~6 ticks no dejar que el pateador
-    // rearranque la carga automática al seguir pegado a la pelota después
-    // del disparo. Sin esto, _handlePowerShotInterno arrancaba una carga
-    // fantasma que a los 2 ticks se cancelaba y rompía la comba recién
-    // iniciada.
     STATE.powershotKickLockId = player.id;
     STATE.powershotKickLockTs = Date.now();
     return estaba;
@@ -1192,15 +1118,10 @@ function colorPelotaOriginal() {
         if (/^[0-9A-F]{6}$/.test(h)) return h;
     }
     if (typeof c === "number" && c >= 0) return (c & 0xFFFFFF).toString(16).padStart(6, "0").toUpperCase();
-    // colorPelotaDefault es null o inválido: NUNCA devolver -1, porque si el
-    // engine lo interpreta como "reset al nativo" y el stadium no tiene un
-    // color de pelota definido, la pelota queda invisible/desaparecida.
-    // Fallback duro a blanco para que siempre se vea.
     return CONFIG.POWERSHOT_COLOR_INICIAL;
 }
 function restaurarColorPelotaSiLibre() { if (hayEfectoDeColorActivo()) return; setColorPelota(colorPelotaOriginal()); }
 
-// ── Festejo VIP ──
 function iniciarFestejoVip(player) {
     if (!player || STATE.festejosVipActivos[player.id]) return;
     STATE.vipBallTrailActivo = false;
@@ -1240,7 +1161,6 @@ function manejarFestejosVip(playerList) {
     }
 }
 
-// ── Rainbow jersey ──
 function restaurarCamisetaEquipo(team, orig) {
     if (!orig) return;
     safeOperation(() => STATE.room.setTeamColors(team, orig.angle ?? 90, textoContrasteCamiseta(orig.colors[0]), orig.colors));
@@ -1253,12 +1173,6 @@ function activarRainbowEquipo(team) {
         colorOriginal: orig || { angle: 90, colors: team === 1 ? [0xFF0000] : [0x0000FF] },
     };
 }
-// FIX rainbow: se corta cuando la pelota vuelve al centro (el saque está por
-// empezar). Haxball reposiciona la pelota al centro DESPUÉS del gol, antes
-// de que los jugadores se reacomoden a sus posiciones de saque. Este es el
-// punto exacto en el que la camiseta tiene que volver a la original.
-// Se ignora la posición durante los primeros 500ms por si la pelota ya
-// estaba en el centro en el momento del gol (gol de taquito desde el medio).
 function manejarRainbowEquipo(ballPos) {
     const r = STATE.rainbowEquipoActivo;
     if (!r) return;
@@ -1276,7 +1190,6 @@ function manejarRainbowEquipo(ballPos) {
     safeOperation(() => STATE.room.setTeamColors(r.team, 90, textoContrasteCamiseta(cn), [cn]));
 }
 
-// ── Votaciones ──
 function iniciarVotacion(tipo, target, votante) {
     const ps = STATE.room.getPlayerList();
     if (ps.length < CONFIG.MIN_PLAYERS_VOTE) return msgError(`Se necesitan ${CONFIG.MIN_PLAYERS_VOTE}+ jugadores`, votante.id);
@@ -1298,9 +1211,18 @@ function votar(tipo, votante) {
     msgSmall(`🗳️ ${votante.name} votó (${v}/${n})`, null, COLORES.advertencia, "small-bold", 1);
     if (v >= n) {
         const t = STATE.votaciones[tipo].target;
-        if (tipo === "expulsar") { STATE.room.kickPlayer(t.id, "Expulsado", false); msgBox(`🚷 ¡EXPULSADO!`, [`${t.name}`], COLORES.error, "small-bold", 2); }
-        else if (tipo === "kick30") { const s = STATE.baseDatos[getPlayerKey(t)]; if (s) aplicarBanGlobal(getPlayerKey(t), CONFIG.VOTEKICK_DURACION_MS); STATE.room.kickPlayer(t.id, "🚷 Votekickeado (30 min)", false); msgBox(`🚷 ¡VOTEKICK!`, [`${t.name}`, `30 min`], COLORES.error, "small-bold", 2); }
-        else if (tipo === "mute30") { const k = getPlayerKey(t); STATE.mutesTemporales = STATE.mutesTemporales.filter(m => m.auth !== k); STATE.mutesTemporales.push({ auth: k, timestamp: Date.now(), duracion: CONFIG.VOTEMUTE_DURACION_MS }); msgBox(`🤫 ¡VOTEMUTE!`, [`${t.name}`, `30 min`], COLORES.advertencia, "small-bold", 2); }
+        // FIX #15: si el target ya no está en la sala, no intentar kickearlo.
+        // Sin esto, kickPlayer sobre un id inexistente puede tirar excepción
+        // y dejar STATE.votaciones[tipo] sin limpiar (porque el throw corta
+        // antes de llegar al reset de abajo).
+        const sigueEnSala = t && STATE.room.getPlayerList().some(pl => pl.id === t.id);
+        if (sigueEnSala) {
+            if (tipo === "expulsar") { STATE.room.kickPlayer(t.id, "Expulsado", false); msgBox(`🚷 ¡EXPULSADO!`, [`${t.name}`], COLORES.error, "small-bold", 2); }
+            else if (tipo === "kick30") { const s = STATE.baseDatos[getPlayerKey(t)]; if (s) aplicarBanGlobal(getPlayerKey(t), CONFIG.VOTEKICK_DURACION_MS); STATE.room.kickPlayer(t.id, "🚷 Votekickeado (30 min)", false); msgBox(`🚷 ¡VOTEKICK!`, [`${t.name}`, `30 min`], COLORES.error, "small-bold", 2); }
+            else if (tipo === "mute30") { const k = getPlayerKey(t); STATE.mutesTemporales = STATE.mutesTemporales.filter(m => m.auth !== k); STATE.mutesTemporales.push({ auth: k, timestamp: Date.now(), duracion: CONFIG.VOTEMUTE_DURACION_MS }); msgBox(`🤫 ¡VOTEMUTE!`, [`${t.name}`, `30 min`], COLORES.advertencia, "small-bold", 2); }
+        } else {
+            msgSmall(`❌ Votación resuelta — el jugador ya no está en la sala`, null, COLORES.error, "small-bold", 0);
+        }
         STATE.votaciones[tipo] = null; STATE.votos[tipo] = {};
     }
 }
@@ -1317,23 +1239,21 @@ function checkFlood(player) {
     }
     return false;
 }
+// FIX #1/D: el chequeo de movimiento ahora depende de playerLastMove que se
+// inicializa al entrar/en cancha y se refresca en onGameTick SOLO cuando la
+// posición cambió. Antes cualquier jugador que no hubiera tocado !afk tenía
+// lastMove=0 y se lo marcaba AFK al instante (y se lo kickeaba a los 20s).
 function checkAFK() {
     const ahora = Date.now();
     STATE.room.getPlayerList().forEach(p => {
         if (p.team === 0) return;
-
         const lastMove = STATE.playerLastMove[p.id] || 0;
         const lastPos = STATE.playerPositions[p.id];
         const currentPos = p.position;
-
-        // 1. No se movió en 90 segundos
-        const afkPorTiempo = ahora - lastMove > 90000;
-
-        // 2. Mismas coordenadas (anti-AFK fake)
+        const afkPorTiempo = lastMove > 0 && (ahora - lastMove > 90000);
         const afkPorPosicion = lastPos && currentPos &&
             Math.abs(lastPos.x - currentPos.x) < 1 &&
             Math.abs(lastPos.y - currentPos.y) < 1;
-
         if (afkPorTiempo || afkPorPosicion) {
             if (!STATE.afkPlayers.has(p.id)) {
                 STATE.afkPlayers.add(p.id);
@@ -1346,7 +1266,6 @@ function checkAFK() {
         }
     });
 }
-
 
 function checkAFKKickAutomatico() {
     const ahora = Date.now();
@@ -1728,7 +1647,6 @@ function dejarArquero(p) {
     aplicarTamanoPersistente(p);
     msgMini(`${p.name} colgó los guantes`, p.id, COLORES.info, 0);
 }
-// ── Helpers de ban global ──
 function aplicarBanGlobal(key, ms) {
     const s = STATE.baseDatos[key]; if (!s) return;
     s.ban_hasta = Date.now() + ms;
@@ -1739,7 +1657,6 @@ function quitarBanGlobal(key) {
     const s = STATE.baseDatos[key]; if (!s) return;
     s.ban_hasta = 0;
     markDirty(key);
-    // Solo la columna ban_hasta, sin tocar blacklisted de la otra sala.
     upsertPlayerBanParcial(key, { ban_hasta: 0 }, ROOM_ID);
 }
 function setBlacklistGlobal(key, valor) {
@@ -1757,20 +1674,18 @@ function modificarFairPlay(player, cantidad, razon) {
     markDirty(k);
 }
 
-// ─── COMANDOS ───
 const commands = {
     "!clave": (p, args) => {
         const key = getPlayerKey(p);
         const b = STATE.authIntentos?.[key], ahora = Date.now();
         if (b && b.hasta > ahora) { const r = Math.ceil((b.hasta - ahora) / 1000); return msgError(`Demasiados intentos. Probá en ${r}s`, p.id); }
         if (args[0] === CONFIG.ADMIN_PASSWORD) {
-            if (STATE.authIntentos) delete STATE.authIntentos[key];
+            delete STATE.authIntentos[key];
             STATE.room.setPlayerAdmin(p.id, true);
             msgBox("👑 Ahora sos admin", [`${p.name} es admin`], COLORES.oro, "small-bold", 2, p.id);
             logMsg('auth.log', `[${ROOM_ID}] Login OK: ${p.name} (${key})`);
             auditLog(p, "LOGIN_ADMIN_OK", p.name);
         } else {
-            if (!STATE.authIntentos) STATE.authIntentos = {};
             const i = STATE.authIntentos[key] || { fallos: 0, hasta: 0 };
             i.fallos++;
             if (i.fallos >= 5) { i.hasta = ahora + 300000; i.fallos = 0; }
@@ -1790,6 +1705,8 @@ const commands = {
         const r = STATE.room.getPlayerList().filter(x => x.team === 1).length;
         const b = STATE.room.getPlayerList().filter(x => x.team === 2).length;
         STATE.room.setPlayerTeam(p.id, r <= b ? 1 : 2);
+        STATE.playerLastMove[p.id] = ahora;
+        if (p.position) STATE.playerPositions[p.id] = { x: p.position.x, y: p.position.y };
         setTimeout(() => aplicarTamanoPersistente(p), 100);
         msgSuccess(`${p.name} entró a la cancha!`, p.id);
     },
@@ -1843,8 +1760,9 @@ const commands = {
         const tot = h.victorias + h.derrotas + h.empates;
         sendAnnouncement(`⚔️ ${p.name} VS ${target.name}\n🟢 ${h.victorias}V 🔴 ${h.derrotas}D ⚪ ${h.empates}E (${tot}, ${Math.round((h.victorias / tot) * 100)}%)`, p.id, COLORES.advertencia, "small", 0);
     },
+    // FIX #3: filtrar jugadores con partidos > 0 como el resto de los tops.
     "!tabla": (p) => {
-        const top = Object.values(STATE.baseDatos).sort((a, b) => b.mmr - a.mmr).slice(0, 5).map((s, i) => `${i + 1}. ${getTituloSeguro(s.titulo).nombre} ${s.nombre_actual} - ${s.mmr}`);
+        const top = Object.values(STATE.baseDatos).filter(s => (s.partidos || 0) > 0).sort((a, b) => b.mmr - a.mmr).slice(0, 5).map((s, i) => `${i + 1}. ${getTituloSeguro(s.titulo).nombre} ${s.nombre_actual} - ${s.mmr}`);
         top.push(footerRanking());
         msgCaja(`🏆 Top 5 · Temporada ${STATE.TEMPORADA_ACTUAL}`, top, COLORES.oro, "small", 0, p.id);
     },
@@ -2079,15 +1997,10 @@ const commands = {
     },
     "!votar": (p, args) => { if (!args[0]) return msgError("Uso: !votar expulsar", p.id); votar(args[0].toLowerCase(), p); },
 
-    // ── !afk (con cooldown anti-teletransporte) ──
     "!afk": (p) => {
         const key = getPlayerKey(p);
         const ahora = Date.now();
 
-        // Cooldown de toggle: sólo aplica durante partido y sólo al VOLVER
-        // (avisar que te vas AFK nunca tiene cooldown, para no castigar al
-        // que realmente se tiene que ir). Corta el ciclo "!afk → sale →
-        // !afk → entra" que se usaba como teletransporte al arco.
         if (STATE.partidoEnCurso && STATE.afkPlayers.has(p.id)) {
             const ult = STATE.ultimoToggleAfk[p.id];
             if (ult && ahora - ult < CONFIG.AFK_TOGGLE_COOLDOWN_MS) {
@@ -2098,7 +2011,6 @@ const commands = {
         STATE.ultimoToggleAfk[p.id] = ahora;
 
         if (STATE.afkPlayers.has(p.id)) {
-            // Volver de AFK: exigir un mínimo de permanencia.
             const desde = STATE.afkDesde[p.id] || ahora;
             if (ahora - desde < CONFIG.AFK_MIN_DURACION_MS) {
                 const f = Math.ceil((CONFIG.AFK_MIN_DURACION_MS - (ahora - desde)) / 1000);
@@ -2113,6 +2025,7 @@ const commands = {
                 const b = STATE.room.getPlayerList().filter(x => x.team === 2).length;
                 safeOperation(() => STATE.room.setPlayerTeam(p.id, r <= b ? 1 : 2));
             }
+            STATE.playerLastMove[p.id] = ahora;
             msgSuccess(`Volviste`, p.id);
         } else {
             STATE.afkPlayers.add(p.id);
@@ -2547,6 +2460,8 @@ const commands = {
         if (tid === 1) STATE.ultimasCamisetas.cam1 = club; else STATE.ultimasCamisetas.cam2 = club;
         msgSmall(`🎽 ${eq} ahora con la de ${club.name}`, p.id, COLORES.oro, "small-bold", 1);
     },
+    // FIX #7: si el owner tipea un tier, se SUBE el tier (no se apaga el VIP).
+    // Antes sólo toggleaba, así que no había forma de promover un VIP vivo.
     "!vip": (p, args) => {
         if (!esOwner(p)) return msgError("Solo owner", p.id);
         if (!args.length) return msgError("Uso: !vip [jugador] (tier)", p.id);
@@ -2559,12 +2474,19 @@ const commands = {
         const key = getPlayerKey(t), s = STATE.baseDatos[key];
         if (esKeyAnonima(key)) return msgError(`${t.name} no tiene auth.`, p.id);
         if (!s) return msgError("Sin perfil", p.id);
-        s.vip = !s.vip;
-        if (s.vip) s.vip_tier = tp || s.vip_tier || "vip";
+        if (tp) {
+            s.vip = true;
+            s.vip_tier = tp;
+        } else {
+            s.vip = !s.vip;
+        }
         markDirty(key);
         const ti = CONFIG.VIP_TIERS[s.vip_tier] || CONFIG.VIP_TIERS.vip;
         msgSmall(s.vip ? `${ti.emoji} ${t.name} es ${ti.nombre}` : `${t.name} ya no es VIP`, p.id, 0x00FFFF, "small-bold", 1);
     },
+    // FIX #9: además de liberar el nombre, kickear al impostor conectado.
+    // Antes quedaba en la sala con la key ya borrada de baseDatos — sus
+    // stats desaparecían pero seguía jugando hasta el próximo leave.
     "!liberarnombre": (p, args) => {
         if (!esOwner(p)) return msgError("Solo owner", p.id);
         if (!args.length) return msgError("Uso: !liberarnombre [nombre]", p.id);
@@ -2574,6 +2496,10 @@ const commands = {
         if (!lg) return msgError(`No existe "${nv}"`, p.id);
         if (!lg._reclamado || !lg._reclamadoPor) return msgError(`"${nv}" ya está libre`, p.id);
         const imp = lg._reclamadoPor;
+        // Si el impostor todavía está conectado, sacarlo de la sala antes de
+        // borrar su perfil — si no, queda operando con una key fantasma.
+        const impostorPl = STATE.room.getPlayerList().find(pl => getPlayerKey(pl) === imp);
+        if (impostorPl) safeOperation(() => STATE.room.kickPlayer(impostorPl.id, "🔓 Ese nombre fue liberado por el dueño", false));
         delete STATE.baseDatos[imp];
         deletePlayerLocal(imp);
         deletePlayerGlobalRow(imp);
@@ -2665,11 +2591,9 @@ const commands = {
     },
 };
 
-// Aliases EN
 const ALIAS_EN = { "!help": "!ayuda", "!commands": "!comandos", "!play": "!jugar", "!profile": "!perfil", "!rank": "!rango", "!shop": "!tienda", "!map": "!mapa", "!teams": "!equipos", "!time": "!tiempo", "!live": "!vivo", "!top": "!tabla", "!goals": "!goles", "!assists": "!asist", "!coins": "!monedas", "!missions": "!misiones" };
 for (const [a, o] of Object.entries(ALIAS_EN)) if (commands[o] && !commands[a]) commands[a] = commands[o];
 
-// !x2jt..!x7jt
 const BRACKETS_FIJOS_JT = { 2: { e: 2, m: ["futx1-2"], l: "X2" }, 3: { e: 3, m: ["futx3"], l: "X3" }, 5: { e: 5, m: ["futx5"], l: "X5" }, 6: { e: 6, m: ["futx6"], l: "X6" }, 7: { e: 7, m: ["futx7"], l: "X7" } };
 for (const [n, c] of Object.entries(BRACKETS_FIJOS_JT)) {
     const bf = { max: Infinity, equipoSize: c.e, mapas: c.m };
@@ -2721,18 +2645,24 @@ commands["!panel"] = (p, args, isA) => {
     op.accion(p, isA);
 };
 
-// ── ELO / XP / Títulos ──
+// FIX #2: actualizar el título interno SIEMPRE, aunque el usuario tenga
+// titulo_custom (que sólo cambia el display). Antes un custom-title congelaba
+// s.titulo para siempre, así que si después el user perdía el custom (por
+// ejemplo, porque otro compró el exclusivo), quedaba anclado al rango viejo.
 function actualizarTitulo(pOrK, sil = false) {
     let key, nom, tid = null;
     if (typeof pOrK === "string") { key = pOrK; nom = STATE.baseDatos[key]?.nombre_actual || "Jugador"; }
     else { key = getPlayerKey(pOrK); nom = pOrK.name; tid = pOrK.id; }
-    const s = STATE.baseDatos[key]; if (!s || s.titulo_custom) return;
+    const s = STATE.baseDatos[key]; if (!s) return;
+    const tieneCustom = !!s.titulo_custom;
     let nv = "bronce1";
     for (const [k, t] of Object.entries(TITULOS)) if (s.mmr >= t.req) nv = k;
     if (s.titulo !== nv) {
         const nt = getTituloSeguro(nv);
         const sub = nt.req > getTituloSeguro(s.titulo).req;
-        if (!sil) {
+        // Si tiene custom, no anunciamos el cambio de rango subyacente —
+        // sólo actualizamos s.titulo para que quede consistente.
+        if (!sil && !tieneCustom) {
             const sg = getSiguienteRango(nv);
             const pr = sub && sg ? ` (${Math.max(0, sg.req - s.mmr)} ELO para ${sg.nombre})` : "";
             let t;
@@ -2749,9 +2679,12 @@ function actualizarTitulo(pOrK, sil = false) {
     }
     markDirty(key);
 }
+// FIX #5: no consumir el boost si no hay XP ganada. Antes un gol con 0 XP
+// (cosa que pasa si el boost ya se había gastado en un partido anterior) o
+// una llamada con cantidad=0 lo apagaba sin dar nada a cambio.
 function darXP(player, cantidad) {
     const key = player.key || getPlayerKey(player);
-    const s = STATE.baseDatos[key]; if (!s || !validarCantidad(cantidad, 0)) return;
+    const s = STATE.baseDatos[key]; if (!s || !validarCantidad(cantidad, 0) || cantidad <= 0) return;
     if (s.boost_xp_activo) { cantidad *= 2; s.boost_xp_activo = false; msgSmall(`⚡ ¡Boost XP x2!`, player.id, 0xAA00FF, "small-bold", 1); }
     s.xp += cantidad;
     const nv = Math.floor(s.xp / 100) + 1;
@@ -2775,30 +2708,16 @@ function calcularPerformanceMultiplier({ goles = 0, asistencias = 0, atajadas = 
 }
 function calcularBonusRacha(r) { if (r >= 10) return CONFIG.ELO_RACHA_10; if (r >= 5) return CONFIG.ELO_RACHA_5; if (r >= 3) return CONFIG.ELO_RACHA_3; return 0; }
 function calcularCambioElo(eloJugador, eloRival, resultado, partidosJugados, ajustePerformance = 0, esAbandono = false) {
-    // 1. Factor K según experiencia
     const factorK = kFactorPara(partidosJugados, eloJugador);
-
-    // 2. Diferencia de ELO (limitada)
     const diferenciaElo = Math.max(-400, Math.min(400, eloRival - eloJugador));
-
-    // 3. Probabilidad esperada
     const probabilidadEsperada = 1 / (1 + Math.pow(10, diferenciaElo / 400));
-
-    // 4. Cambio base
     let cambio = factorK * (resultado - probabilidadEsperada);
-
-    // 5. Aplicar ajuste por performance
     const multiplicador = cambio >= 0 ? (1 + ajustePerformance) : (1 - ajustePerformance);
     cambio = Math.round(cambio * multiplicador);
-
-    // 6. Aplicar límites
-    if (resultado === 1) cambio = Math.max(CONFIG.ELO_CAMBIO_MIN_GANANDO, Math.min(CONFIG.ELO_CAMBIO_MAX, cambio)); // Victoria
-    else if (resultado === 0) cambio = Math.min(-CONFIG.ELO_CAMBIO_MIN_PERDIENDO, Math.max(-CONFIG.ELO_CAMBIO_MAX, cambio)); // Derrota
-    else cambio = Math.max(-Math.round(CONFIG.ELO_CAMBIO_MAX / 3), Math.min(Math.round(CONFIG.ELO_CAMBIO_MAX / 3), cambio)); // Empate
-
-    // 7. Penalización por abandono
+    if (resultado === 1) cambio = Math.max(CONFIG.ELO_CAMBIO_MIN_GANANDO, Math.min(CONFIG.ELO_CAMBIO_MAX, cambio));
+    else if (resultado === 0) cambio = Math.min(-CONFIG.ELO_CAMBIO_MIN_PERDIENDO, Math.max(-CONFIG.ELO_CAMBIO_MAX, cambio));
+    else cambio = Math.max(-Math.round(CONFIG.ELO_CAMBIO_MAX / 3), Math.min(Math.round(CONFIG.ELO_CAMBIO_MAX / 3), cambio));
     if (esAbandono) cambio -= CONFIG.ELO_PENALIZACION_ABANDONO;
-
     return cambio;
 }
 function aplicarCambioEloPartido(s, { eloRival, resultado, cambio, motivo }) {
@@ -2832,12 +2751,19 @@ function verificarBadgesPostPartido(player, s, gE) {
     if (!s.badges.includes("anti_ragequit") && s.partidos >= 20 && s.ragequits === 0) darBadge(player, "anti_ragequit");
 }
 function xpNecesariaParaNivel(n) { return n * CONFIG.CLAN_XP_BASE_NIVEL; }
+// FIX #8: usar while en vez de if. Con una ganancia grande de XP de clan
+// (o un nivel base muy bajo) el if sólo subía un nivel por partido y dejaba
+// el resto del XP colgado sin consumir.
 function sumarXPClan(id, c) {
     const cl = STATE.clanes[id]; if (!cl) return;
     cl.nivel = cl.nivel || 1; cl.xp = (cl.xp || 0) + c;
-    const req = xpNecesariaParaNivel(cl.nivel);
-    if (cl.xp >= req) {
-        cl.xp -= req; cl.nivel++;
+    let subio = false;
+    while (cl.xp >= xpNecesariaParaNivel(cl.nivel)) {
+        cl.xp -= xpNecesariaParaNivel(cl.nivel);
+        cl.nivel++;
+        subio = true;
+    }
+    if (subio) {
         STATE.room.getPlayerList().forEach(pl => { if (STATE.baseDatos[getPlayerKey(pl)]?.clan === id) msgSmall(`⚔️ ${cl.nombre} llegó a Nivel ${cl.nivel}`, pl.id, 0xFF00FF, "small-bold", 1); });
     }
 }
@@ -2869,11 +2795,9 @@ function getFiguraDelPartido(forzar = false) {
     if (!forzar && figuraCache && STATE.partidoEnCurso) {
         return figuraCache;
     }
-
     const ps = STATE.room.getPlayerList().filter(p => p.team !== 0);
     let maxPuntos = -1;
     let figura = null;
-
     for (const p of ps) {
         const s = STATE.matchStats[p.id] || { goles: 0, asistencias: 0 };
         const puntos = (s.goles || 0) * 3 + (s.asistencias || 0) * 2 + (s.atajadas || 0) * 1.5;
@@ -2882,14 +2806,14 @@ function getFiguraDelPartido(forzar = false) {
             figura = { id: p.id, name: p.name, puntos };
         }
     }
-
     figuraCache = figura;
     return figura;
 }
-
-// Limpiar en onGameStop
+// FIX #11: llamar esta función en onGameStart para no arrastrar el caché
+// del partido anterior. Hoy no rompe porque el guard exige partidoEnCurso,
+// pero si alguien llama getFiguraDelPartido() desde otro lado (ej. !vivo)
+// el cache fantasma puede filtrarse entre partidos.
 function limpiarFiguraCache() { figuraCache = null; }
-
 
 function otorgarMVP(player) {
     if (!player) return;
@@ -2905,7 +2829,6 @@ function otorgarMVP(player) {
 }
 function iniciarVotacionMVP(f) { if (f) otorgarMVP(f); }
 
-// ─── EVENTOS ───
 function setupEvents() {
     STATE.room.onPlayerJoin = async function(player) {
         try {
@@ -2985,6 +2908,13 @@ function setupEvents() {
                 const b2 = STATE.room.getPlayerList().filter(x => x.team === 2).length;
                 STATE.room.setPlayerTeam(player.id, r <= b2 ? 1 : 2);
             } else STATE.room.setPlayerTeam(player.id, 0);
+            // FIX #1/D: inicializar tracking de movimiento al entrar para que
+            // checkAFK no marque a un jugador recién entrado como AFK por
+            // lastMove=0, y para tener una posición base en playerPositions.
+            const nowMs = Date.now();
+            STATE.playerLastMove[player.id] = nowMs;
+            const postJoin = STATE.room.getPlayer(player.id);
+            if (postJoin && postJoin.position) STATE.playerPositions[player.id] = { x: postJoin.position.x, y: postJoin.position.y };
             setTimeout(() => { const p = STATE.room.getPlayer(player.id); if (p && p.team !== 0) aplicarTamanoPersistente(p); }, 100);
         } catch (e) { logMsg('errors.log', `[${ROOM_ID}] Error onPlayerJoin: ${e.message}\n${e.stack}`); }
     };
@@ -2996,6 +2926,33 @@ function setupEvents() {
             const s = STATE.baseDatos[key];
             const vol = STATE.salidasVoluntarias.has(player.id);
             STATE.salidasVoluntarias.delete(player.id);
+
+            // FIX #15a: reembolsar apuesta pendiente si el jugador se va antes
+            // de que termine el partido. Sin esto, la apuesta queda indexada
+            // por p.id (id de sesión) y si Haxball le reasigna ese id a otro
+            // jugador, el mensaje de "Apuesta ganada" le llega al jugador
+            // equivocado. El reembolso también es lo correcto conceptualmente:
+            // no tiene sentido dejar la apuesta activa a nombre de alguien que
+            // ya no está presenciando el partido.
+            if (STATE.apuestas[player.id]) {
+                const a = STATE.apuestas[player.id];
+                const sA = STATE.baseDatos[a.key];
+                if (sA) { sA.monedas += a.cantidad; markDirty(a.key); }
+                delete STATE.apuestas[player.id];
+            }
+
+            // FIX #15b: invalidar cualquier votación activa donde el target
+            // sea el que se va. Sin esto, cuando el último voto llegue, votar()
+            // llamaría kickPlayer(t.id) sobre un id inexistente — dependiendo
+            // de haxball.js puede tirar excepción no controlada y dejar
+            // STATE.votaciones[tipo] sin limpiar.
+            for (const tipo of Object.keys(STATE.votaciones)) {
+                if (STATE.votaciones[tipo]?.target?.id === player.id) {
+                    STATE.votaciones[tipo] = null; STATE.votos[tipo] = {};
+                    msgSmall(`❌ Votación cancelada — el jugador se desconectó`, null, COLORES.error, "small-bold", 1);
+                }
+            }
+
             if (STATE.partidoEnCurso && player.team !== 0 && !vol) {
                 STATE.abandonos.set(key, { team: player.team, ts: Date.now(), stats: { ...(STATE.matchStats[player.id] || { goles: 0, asistencias: 0, atajadas: 0 }) } });
             }
@@ -3024,6 +2981,10 @@ function setupEvents() {
             STATE.radioJugadorCache.delete(player.id);
             const ig = STATE.animacionGolIntervalos.get(player.id); if (ig) clearInterval(ig); STATE.animacionGolIntervalos.delete(player.id);
             STATE.animacionGolIntervalos.delete(player.id); STATE.animacionGolActiva.delete(player.id); STATE.animacionGolTokenPorId.delete(player.id);
+            // FIX R: si el jugador estaba en cancha con partido en curso,
+            // resetear su flag `jugando` — antes quedaba pegado en true para
+            // siempre y ensuciaba la base con jugadores fantasma.
+            if (s && s.jugando) { s.jugando = false; markDirty(key); }
             if (STATE.partidoEnCurso) for (const t of [1, 2]) if (STATE.capitanes[t] === player.id) asegurarCapitan(t, { anunciar: true });
             if (STATE.automatizadoActivado) ejecutarAutomatizado();
         } catch (e) { logMsg('errors.log', `[${ROOM_ID}] Error onPlayerLeave: ${e.message}\n${e.stack}`); }
@@ -3033,6 +2994,12 @@ function setupEvents() {
         try {
             if (ch.team !== 0 && STATE.afkPlayers.has(ch.id)) {
                 STATE.afkPlayers.delete(ch.id); delete STATE.afkDesde[ch.id]; STATE.afkAvisado30s.delete(ch.id);
+            }
+            // FIX #1/D: refrescar tracking cada vez que el jugador está en
+            // cancha, no sólo cuando volvía de AFK. Sin esto, cualquier
+            // jugador que nunca tocó !afk tenía lastMove=0 y el primer
+            // checkAFK lo marcaba AFK al instante (y a los 20s lo kickeaba).
+            if (ch.team !== 0) {
                 STATE.playerLastMove[ch.id] = Date.now();
                 if (ch.position) STATE.playerPositions[ch.id] = { x: ch.position.x, y: ch.position.y };
             }
@@ -3053,10 +3020,22 @@ function setupEvents() {
             if (!STATE.partidoEnCurso) return;
             const sc = STATE.room.getScores();
             if (sc) STATE.ultimoMarcadorConocido = { red: sc.red, blue: sc.blue, time: sc.time, scoreLimit: sc.scoreLimit, timeLimit: sc.timeLimit };
+            // FIX #1/D: actualizar playerLastMove SÓLO cuando la posición
+            // cambió de verdad — esto es lo que checkAFK usa para saber
+            // quién se movió en los últimos 90s.
+            const ahoraTick = Date.now();
+            for (const p of jt) {
+                if (p.team === 0 || !p.position) continue;
+                const prev = STATE.playerPositions[p.id];
+                if (!prev || Math.abs(prev.x - p.position.x) > 0.5 || Math.abs(prev.y - p.position.y) > 0.5) {
+                    STATE.playerLastMove[p.id] = ahoraTick;
+                    STATE.playerPositions[p.id] = { x: p.position.x, y: p.position.y };
+                }
+            }
             const bF = aplicarComba(bp, bpt, jt);
             limitarVelocidadPelota(bF || bpt);
             manejarFestejosVip(jt);
-            manejarRainbowEquipo(bp);   // usa ballPos para detectar saque
+            manejarRainbowEquipo(bp);
             if (bp) jt.forEach(p => { if (p.team === 0 || !p.position) return; if (pointDistance(p.position, bp) < 25) { if (p.team === 1) STATE.equipoRojoPosesion++; else if (p.team === 2) STATE.equipoAzulPosesion++; } });
             detectArquero(jt);
             revisarArquerosReservados(jt, bp);
@@ -3181,7 +3160,7 @@ function setupEvents() {
                 }
                 const fr = ["🔥 Rompe la defensa", "🧠 Definición fría", "💨 No lo vieron venir", "🎯 Al ángulo", "🌪️ Relámpago", "🦵 Con clase"];
                 anunciarGol(tit, team, gT.name, aT ? aT.name : null, vK, sc, fr[Math.floor(Math.random() * fr.length)]);
-                activarRainbowEquipo(team);   // ← camiseta rainbow
+                activarRainbowEquipo(team);
                 if (gol) {
                     const sV = STATE.baseDatos[getPlayerKey(gol)];
                     if (sV?.vip) iniciarFestejoVip(gol);
@@ -3207,6 +3186,7 @@ function setupEvents() {
 
     STATE.room.onGameStart = function() {
         try {
+            limpiarFiguraCache(); // FIX #11
             STATE.matchStats = {}; STATE.toquesRecientes = [];
             STATE.equipoRojoPosesion = 0; STATE.equipoAzulPosesion = 0;
             STATE.inicioPartido = Date.now(); STATE.partidoEnCurso = true;
@@ -3217,13 +3197,6 @@ function setupEvents() {
             STATE.rainbowEquipoActivo = null;
             safeOperation(() => STATE.room.startRecording());
             STATE.festejosVipActivos = {};
-            // Leer el color base de la pelota del mapa. Si la lectura falla o
-            // devuelve algo inválido (ej. -1 = transparente/nativo sin color),
-            // reintentar a los 300ms y por defecto usar blanco. Además hay que
-            // forzar ultimoColorPelotaEnviado=null porque el dedupe de
-            // setColorPelota persiste entre partidos: si del partido anterior
-            // quedó guardado un valor a medio terminar (o -1), sin reset nunca
-            // se emitiría el color bueno en el nuevo partido → pelota invisible.
             const pb = safeOperation(() => STATE.room.getDiscProperties(0));
             if (pb && typeof pb.color === "number" && pb.color >= 0) {
                 STATE.colorPelotaDefault = pb.color;
@@ -3240,8 +3213,17 @@ function setupEvents() {
             STATE.eventoGolX2Activo = false;
             programarEventoAleatorio();
             asignarCamisetas();
+            const nowMs = Date.now();
             STATE.room.getPlayerList().forEach(p => {
-                if (p.team !== 0) { const k = getPlayerKey(p); if (STATE.baseDatos[k]) STATE.baseDatos[k].jugando = true; STATE.matchStats[p.id] = { goles: 0, asistencias: 0, ultimoFuePowerShot: 0 }; aplicarTamanoPersistente(p); }
+                if (p.team !== 0) {
+                    const k = getPlayerKey(p);
+                    if (STATE.baseDatos[k]) STATE.baseDatos[k].jugando = true;
+                    STATE.matchStats[p.id] = { goles: 0, asistencias: 0, ultimoFuePowerShot: 0 };
+                    aplicarTamanoPersistente(p);
+                    // FIX #1/D: inicializar tracking al arrancar partido
+                    STATE.playerLastMove[p.id] = nowMs;
+                    if (p.position) STATE.playerPositions[p.id] = { x: p.position.x, y: p.position.y };
+                }
             });
             markDirty();
             asignarCapitanes();
@@ -3269,20 +3251,28 @@ function setupEvents() {
             if (STATE.rainbowEquipoActivo) { restaurarCamisetaEquipo(STATE.rainbowEquipoActivo.team, STATE.rainbowEquipoActivo.colorOriginal); STATE.rainbowEquipoActivo = null; }
             limpiarCapitanes();
             if (STATE.liveStatsMessageId) editarMensajeLive(STATE.liveStatsMessageId, embedEstadoSala());
-            // Obtener el marcador FINAL directamente del motor, no de STATE.ultimoMarcadorConocido
-            // que puede estar desactualizado. Esto es CRITICO para que el ELO se guarde correctamente
             const sc = safeOperation(() => STATE.room.getScores()) || STATE.ultimoMarcadorConocido;
+            // FIX C: si sc es null (stopGame sin partido real, race con getScores,
+            // etc.), no podemos procesar ELO. Limpiamos lo que se pueda y salimos
+            // — antes esto throweaba en `sc.red` y onGameStop moría a mitad de
+            // camino dejando estado sucio (powershot defaults, curva, capitanes,
+            // festejos) sin limpiar.
+            if (!sc) {
+                const psLimpias = STATE.room.getPlayerList();
+                psLimpias.forEach(p => { const k = getPlayerKey(p); if (STATE.baseDatos[k]) STATE.baseDatos[k].jugando = false; });
+                // Reembolsar apuestas — nadie va a cobrar nada sin marcador.
+                Object.values(STATE.apuestas).forEach(a => { const s = STATE.baseDatos[a.key]; if (s) s.monedas += a.cantidad; markDirty(a.key); });
+                STATE.apuestas = {};
+                msgSmall(`⚠️ Partido detenido sin marcador — ELO no afectado`, null, COLORES.advertencia, "small-bold", 1);
+                STATE.ultimoMarcadorConocido = null;
+                markDirty();
+                return;
+            }
             const sinLim = sc && sc.timeLimit === 0 && sc.scoreLimit === 0;
-            // Verificar si el partido termino de forma natural:
-            // - Por tiempo: tiempo actual >= limite de tiempo
-            // - Por goles: alguno de los equipos alcanzo el limite de goles
-            // - Sin limites: partido sin tiempo ni goles limite, pero duro mas de 30 segundos
             const tiempoAlcanzado = sc && sc.timeLimit > 0 && sc.time >= sc.timeLimit * 60;
             const golesAlcanzados = sc && sc.scoreLimit > 0 && (sc.red >= sc.scoreLimit || sc.blue >= sc.scoreLimit);
             const sinLimitesValido = sinLim && (Date.now() - STATE.inicioPartido) > 30000;
             const nat = sc && (tiempoAlcanzado || golesAlcanzados || sinLimitesValido);
-            // SOLO cancelar si el partido NO termino naturalmente Y no hay jugadores en equipos
-            // Si hay jugadores en equipos, asumimos que el partido termino y procesamos el ELO
             const ps = STATE.room.getPlayerList();
             const jugadoresEnEquipos = ps.filter(p => p.team === 1 || p.team === 2).length;
             if (!nat && jugadoresEnEquipos === 0) {
@@ -3293,15 +3283,18 @@ function setupEvents() {
                 if (Object.keys(STATE.apuestas).length) msgInfo("Apuestas reembolsadas", null);
                 STATE.apuestas = {}; markDirty(); return;
             }
-            // Si el partido no termino naturalmente pero hay jugadores, lo tratamos como natural
-            // para que se guarde el ELO. Esto evita el problema de partidos cerrados abruptamente.
             const gan = sc.red > sc.blue ? 1 : (sc.blue > sc.red ? 2 : 0);
             try {
                 const buf = STATE.room.stopRecording();
                 if (buf && buf.length) enviarEventoBot("replay", { archivoBase64: Buffer.from(buf).toString("base64"), nombreArchivo: `${CONFIG.NOMBRE_SALA || "replay"}_${Date.now()}.hbr2`, embed: construirEmbed({ title: "🎬 Replay", description: `Rojo ${sc.red} - ${sc.blue} Azul`, color: 0x9B59B6 }) }).catch(() => { });
             } catch (e) { logMsg('errors.log', `[${ROOM_ID}] Error replay: ${e.message}`); }
             STATE.records.partidosTotalesLiga = (STATE.records.partidosTotalesLiga || 0) + 1; markDirty();
-            Object.entries(STATE.apuestas).forEach(([pid, a]) => { const s = STATE.baseDatos[a.key]; if (!s) return; if (a.equipo === gan) { const pr = Math.round(a.cantidad * CONFIG.CUOTA_APUESTA); s.monedas += pr; msgSmall(`🎰 Apuesta ganada +${pr}💰`, parseInt(pid, 10), COLORES.exito, "small-bold", 1); } });
+            // FIX #10: agregar markDirty en el pago del premio (para persistir
+            // las monedas ganadas por apuesta) y limpiar STATE.apuestas después
+            // del pago — sin esto, la apuesta vieja quedaba para siempre y se
+            // re-pagaba en cada partido siguiente (fuga grave de moneda).
+            Object.entries(STATE.apuestas).forEach(([pid, a]) => { const s = STATE.baseDatos[a.key]; if (!s) return; if (a.equipo === gan) { const pr = Math.round(a.cantidad * CONFIG.CUOTA_APUESTA); s.monedas += pr; msgSmall(`🎰 Apuesta ganada +${pr}💰`, parseInt(pid, 10), COLORES.exito, "small-bold", 1); markDirty(a.key); } });
+            STATE.apuestas = {};
             const r = ps.filter(p => p.team === 1), a = ps.filter(p => p.team === 2);
             const mr = r.length ? r.reduce((s, p) => s + (STATE.baseDatos[getPlayerKey(p)]?.mmr || 1000), 0) / r.length : 1000;
             const ma = a.length ? a.reduce((s, p) => s + (STATE.baseDatos[getPlayerKey(p)]?.mmr || 1000), 0) / a.length : 1000;
@@ -3454,7 +3447,6 @@ function setupEvents() {
     };
 }
 
-// ─── ARRANQUE ───
 process.on('uncaughtException', (err) => { console.error('No capturado:', err); logMsg('errors.log', `[${ROOM_ID}] Uncaught: ${err.message}\n${err.stack}`); });
 process.on('unhandledRejection', (reason) => { console.error('Promesa rechazada:', reason); logMsg('errors.log', `[${ROOM_ID}] UnhandledRejection: ${reason}`); });
 
@@ -3543,7 +3535,6 @@ setInterval(guardarVerif, 30000);
         STATE.roomLink = link;
         STATE.inicioSala = Date.now();
         safeOperation(() => STATE.room.setPlayerTeam(STATE.BOT_ID, 0));
-        // Reusar el live message id si está persistido, sino crear.
         (async () => {
             const idGuardado = await getBotState("live_message_id");
             if (idGuardado) {
@@ -3597,7 +3588,10 @@ setInterval(guardarVerif, 30000);
         for (const [k, ts] of STATE.cooldownsCmd.entries()) if (ts < ahora) STATE.cooldownsCmd.delete(k);
         for (const [k, inv] of Object.entries(STATE.clanInvitaciones)) if (inv.expira && inv.expira < ahora) delete STATE.clanInvitaciones[k];
         for (const [k, h] of Object.entries(STATE.mensajesRecientes)) if (!h || !h.length) delete STATE.mensajesRecientes[k];
-        if (STATE.partidoEnCurso) {
+        // FIX #6: chequear expiración VIP sin depender de que haya partido en
+        // curso. Antes quedaba atrapado dentro de `if (STATE.partidoEnCurso)`
+        // así que un VIP sin partido no expiraba nunca hasta el próximo kick.
+        if (STATE.room) {
             STATE.room.getPlayerList().forEach(pl => {
                 const s = STATE.baseDatos[getPlayerKey(pl)];
                 if (s && !s.vip_perma && s.vip_expira && ahora > s.vip_expira) { s.vip = false; s.vip_expira = null; s.vip_tier = "vip"; markDirty(getPlayerKey(pl)); msgSmall("⌛ Tu VIP expiró", pl.id, COLORES.advertencia, "small", 0); }
